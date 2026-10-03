@@ -1,7 +1,7 @@
 # SwitchMTP — 交接上下文
 
 目标：用现代 macOS 技术重写 Android File Transfer（AFT），主要用于和 Switch 上的 **DBI**（MTP 模式）传文件。
-当前阶段：**方案 A 可行性验证（spike）**。验证结论写回本文件末尾「验证记录」，供后续会话继续。
+当前阶段：**方案 A 可行性验证已完成（2026-10-03），结论：选方案 A**，详见末尾「验证记录」。下一步是正式开发。
 
 ## 环境
 - macOS 27.0.1（Apple 芯片），Xcode 27.0，Swift 6.4
@@ -40,5 +40,87 @@
 - spike 代码保持简单，放在 `spike/` 目录下，Swift Package 或单文件都可以。
 - 用户偏好：简体中文交流；代码标识符保持英文。
 
-## 验证记录
-（待填写：每个问题的结论、关键日志或输出、吞吐量数据，以及最终选方案 A 还是方案 B）
+## 验证记录（2026-10-03，spike 代码：`spike/`）
+
+实验程序：`spike/` 下的 Swift Package 命令行工具 `ptpspike`（用法见 `main.swift` 文件头）。
+运行：`cd spike && swift build -c release && .build/release/ptpspike info`。测试时 AFT 未运行，DBI 接口由 ptpcamerad 独占（`UsbExclusiveOwner = ptpcamerad`）。
+链路：DBI 是 **USB 2.0 High Speed**（ioreg `UsbLinkSpeed = 480000000`，`bcdUSB = 0x0200`），bulk 实际上限约 40 MB/s。
+
+### 结论速览
+| 项目 | 结果 |
+|---|---|
+| 命令行工具能否拿到设备 | ✅ 能。无 TCC 弹窗、无需 entitlement，不用改成 app |
+| ICDeviceBrowser 发现 DBI | ✅ `ICCameraDevice`，name=`Switch`，capabilities = `CanDeleteOneFile` + `CanAcceptPTPCommands` |
+| requestSendPTPCommand 原始指令 | ✅ 标准 PTP + MTP 扩展 + Android 扩展全部可用，ptpcamerad 不过滤 |
+| 完整目录树 | ✅ 8 个存储全部可遍历；SD 卡 11596 个对象全树 17.3 s |
+| 64 位文件大小 | ✅ GetObjectPropValue(0xDC04) 正确返回 >4 GB 大小 |
+| 读取吞吐 | ✅ 38.5 MB/s（块 ≥16 MB），2.49 GB 完整读取 35.8 MB/s，已贴近 USB 2.0 上限 |
+| 写入吞吐 | ✅ 单次 SendObject 30.7–32.5 MB/s；SendPartialObject 分段写 30–31 MB/s |
+| 单次 SendObject 上限 | ⚠️ **4294967283 字节（4 GB−13）**，超过会让本进程崩溃（XPC 限制，见下） |
+| ICC 自带 contents/mediaFiles | ❌ 都是 0 项，完全不可用，必须走原始 PTP |
+
+### 问题 1：能不能看到 DBI
+- mask = `ICDeviceTypeMaskCamera | ICDeviceLocationTypeMaskLocal`（0x101）即可。`didAdd`：`name=Switch type=0x101 class=ICCameraDevice transport=ICTransportTypeUSB usbVID=0x057E usbPID=0x201D`，serial `XAW00000000000`。
+- `requestOpenSession` 立即成功（0.00 s），随后很快收到 `deviceDidBecomeReady`。打开会话前后都不需要授权（macOS 上 ICC 没有授权 API，那些只在 iOS 上有）。
+- 发送 PTP 指令不需要等 deviceDidBecomeReady。框架已替我们开好 PTP session，**不要再发 OpenSession**。
+
+### 问题 2：MTP 指令与目录树
+**指令格式**（已确认）：`ptpCommand` 是完整的 PTP USB 命令 container（`len u32, type=1 u16, code u16, txid u32, params…`，小端）。completion 的**第一个参数是数据阶段（不带 container 头的原始负载）**，第二个参数是 response container（`len=12+4n, type=3, code, txid, params`）。outData 同样是不带头的原始负载。
+**GetDeviceInfo**：`StandardVersion=100 VendorExt=0x6 desc="microsoft.com: 1.0; android.com: 1.0;"`，Manufacturer=Nintendo，Model=Switch，Version=19.0.1。
+OperationsSupported（27 条）：`1001 1002 1003 1004 1005 1007 1008 1009 100B 100C 100D 1014 1015 1016 1019 101B 95C1 95C2 95C3 95C4 95C5 9801 9802 9803 9804 9805 9808`。
+即 GetPartialObject64(95C1)、SendPartialObject(95C2)、TruncateObject(95C3)、Begin/EndEditObject(95C4/95C5)、SendObjectPropList(9808)、DeleteObject(100B)、MoveObject(1019) 都有。Events：`4002 4003 4004 4005 400E 4007 C801`。
+**存储**（GetStorageIDs → GetStorageInfo）：
+| ID | 描述 | access |
+|---|---|---|
+| 0x00010001 | 1: SD Card（普通文件系统，可读写） | 0 读写 |
+| 0x00010002 | 2: Nand USER | 1 只读 |
+| 0x00010003 | 3: Nand SYSTEM | 1 只读 |
+| 0x00010004 | 4: Installed games（已装游戏导出成虚拟 NSP） | 0 |
+| 0x00010005 | 5: SD Card install（**安装目录，禁止测试写入**） | 0 |
+| 0x00010006 | 6: NAND install（**安装目录，禁止测试写入**） | 0 |
+| 0x00010007 | 7: Saves | 0 |
+| 0x00010008 | 8: Album（空，容量 0） | 2 |
+**遍历**：GetObjectHandles(storage, 0, parent；根 = 0xFFFFFFFF) + GetObjectInfo 正常。SD 卡全树（深度 4）11596 个对象（2457 目录 / 9139 文件），每个文件额外读一次 0xDC04，共约 2 万条指令，用时 17.33 s（约 0.85 ms/条）。如需更快可试 GetObjectPropList(parent, 0, 0xFFFFFFFF, 0, depth=1) 批量取。
+**64 位大小**：>4 GB 的文件 ObjectInfo 里 size 为 0xFFFFFFFF，GetObjectPropValue(h, 0xDC04) 返回 u64 真值，例如 `SUPER MARIO ODYSSEY [0100000000010000][v0][Base].nsp` = 5611007880。
+GetObjectPropsSupported(0x3000) = `DC41 PersistentUID, DC01 StorageID, DC0B ParentObject, DC02 ObjectFormat, DC04 ObjectSize, DC44 Name`。**没有日期属性**，ObjectInfo 里的修改时间全是 `19700101T080000`。GetObjectPropList(h, 0, 0xFFFFFFFF, 0, 0) 可用（返回 6 个元素）。
+**写入**（只写在 `1: SD Card/SwitchMTP-spike/`）：SendObjectInfo(storage, parent) 的 response 参数 = `[storage, parent, newHandle]`；目录用 format 0x3001、AssociationType 1 创建。64 KB 文件 SendObject 后用 GetObject 回读，内容一致。
+**对照**：`ICCameraDevice.contents` 顶层 0 项，`mediaFiles` 0 项（即使等到 deviceDidBecomeReady）。
+
+### 问题 3：吞吐量（release 构建，不落盘）
+**读取**（GetPartialObject，Silksong Base NSP，读 512 MB）：
+| 块大小 | 吞吐 | 单块延迟中位 |
+|---|---|---|
+| 1 MB | 28.56 MB/s | 34.8 ms |
+| 4 MB | 35.78 MB/s | 111.4 ms |
+| 16 MB | 38.49 MB/s | 415.3 ms |
+| 32 MB | 38.88 MB/s | 822.3 ms |
+| 64 MB | 38.50 MB/s | 1656 ms |
+- 完整读取 2492437328 字节（2.49 GB，16 MB 块）：66.31 s = **35.84 MB/s**。
+- GetPartialObject64(0x95C1) 跨 4 GB 偏移（SMO Base 从 5000 MB 起读 256 MB）：35.73 MB/s，正常。
+- 传输时 ptpcamerad CPU 约 4%，本进程约 1%；XPC 中转对吞吐基本没有影响，瓶颈在 USB 2.0 和 Switch 端（读的是 DBI 实时打包的虚拟 NSP）。
+- 建议正式实现用 8–16 MB 块：吞吐已饱和，进度更新也够细。
+
+**写入**：
+- 单次 SendObject（mmap 本地文件作为 outData）：256 MB 31.37 MB/s；1 GB 32.46 MB/s；4294967283 字节 133.4 s = 30.70 MB/s。回读校验（ObjectSize + 末尾 1 MB）一致。
+- 分段写（首块 SendObject 64 MB → BeginEditObject → SendPartialObject 64 MB × N → EndEditObject）：256 MB 30.08 MB/s，4.6 GB 30.99 MB/s。在 SD 卡普通目录可用。
+- 内存：单次 SendObject 1 GB 时 ptpcamerad 的 RSS 线性涨到约 1 GB，但 **phys footprint 始终 15 MB**，本进程 footprint 约 1.3 MB。也就是说 XPC 走的是共享映射，没有真正复制，大文件不会吃内存。
+
+### 关键限制与 DBI 怪癖（正式开发必须处理）
+1. **ICC 单条指令的 outData ≤ 4 GB−1**：ImageCaptureCore 把 NSData 内联进 XPC 消息，`_xpc_data_serialize` 遇到 ≥ 2^32 字节就 `_xpc_api_misuse` 触发 **SIGTRAP 崩溃（无法 catch）**。本地用匿名 XPC 连接复现：4294967295 能过，4294967296 崩溃。再算上 PTP container 头的 12 字节，单次 SendObject 的实际上限是 4294967283 字节（已实测成功）。崩溃栈：`-[PTPCameraDeviceManager sendDevicePTPCommandImp:]` → `NSXPCConnection` → `_xpc_data_serialize` → `_xpc_api_misuse`。正式代码必须在发送前检查大小。
+2. **超过 4 GB 的上传只能分段**：SendObjectInfo + 首块 SendObject + BeginEditObject + SendPartialObject(64 位偏移) + EndEditObject。在 SD 卡普通目录验证可行（64 位偏移参数被正确处理，没有回绕）。**但 DBI 的安装存储（5/6）是否接受分段写还没验证**（按要求没往安装目录写）。这是方案 A 剩下的唯一大风险，见「下一步」。
+3. **SD 卡单文件写到约 4 GB 被截断，而且 DBI 不报错**：4.6 GB 分段写时，所有指令都返回 0x2001，但最终 ObjectSize = 4291821556，4 GB 以后的数据全部丢失（4 GB 之前的数据逐段校验一致）。基本可以确定这张 SD 卡是 **FAT32**（单文件上限 4 GB−1），DBI 写入失败时不返回错误。正式实现：**写完必须回读 ObjectSize 校验**；往 SD 普通目录写 >4 GB 文件前应提示（StorageInfo 的 FilesystemType 统一是 2，判断不出 FAT32/exFAT）。
+4. **SendObjectInfo 之后如果没有 SendObject，会留下 0 字节的空文件**（4 次崩溃测试各留下一个）。
+5. **重复 handle**：通过 SendObjectInfo 新建的对象，在 DBI 第一次扫描该目录时会再被登记一次（同名文件出现新旧两个 handle，之后不再增长）。正式实现需要按 (parent, name) 去重，或者上传后重新枚举目录。handle 只在 DBI 的这次 MTP 会话内有效；ptpcamerad 会一直保持 PTP 会话，所以多次运行本工具时 handle 是连续的。
+6. 没有修改时间属性；Album 存储为空。
+
+### 建议：选方案 A
+理由：
+- 三个问题都得到肯定答案：设备可见、MTP 全指令透传（含 Android 64 位扩展）、读写吞吐都已接近 USB 2.0 上限（读 36–39 MB/s，写 31–32 MB/s），XPC 中转几乎没有损耗。
+- 不用跟 ptpcamerad 抢接口，彻底告别 `aft-mtp` 那套杀进程的做法；命令行工具无需任何权限即可工作，后续可以试 App Sandbox。
+- 方案 B 的速度优势在 USB 2.0 链路下不存在（上限一样），却要永远跟受 SIP 保护的 ptpcamerad 抢接口。
+
+**下一步（新会话）**：
+1. **先补验证 >4 GB 游戏安装**（需要用户明确同意往 DBI 安装存储写入，并准备一个 >4 GB 的 NSP）：在 `5: SD Card install` 用 SendObjectInfo（size 字段填 0xFFFFFFFF，或者用 SendObjectPropList 0x9808 带 64 位 ObjectSize）+ 首块 SendObject + SendPartialObject 安装，看 DBI 能否识别并装好。≤4 GB 的 NSP 可以单次 SendObject，按目前数据应该没问题（同样建议先用一个小游戏实测安装）。
+   - 如果 DBI 安装存储不接受分段写：>4 GB 游戏只能用方案 B 的 USB 直连路径（或者让用户在 DBI 里改用别的安装方式），其余功能仍走方案 A。
+2. 开始正式 app：SwiftUI + ImageCaptureCore 的 PTP/MTP 封装层（可以直接复用 `spike/` 里的 Reader/Writer、数据集解析和 `send()`），注意事项见上面「关键限制与 DBI 怪癖」。
+3. 测试残留：SD 卡 `/SwitchMTP-spike/` 里有约 9.5 GiB（10.2 GB）测试文件（含 4 个 0 字节文件），确认后可在 DBI 或 Mac 上删除。

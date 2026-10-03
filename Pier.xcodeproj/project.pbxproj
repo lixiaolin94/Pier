@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		385349FC0E673C2728956452 /* PierKit in Frameworks */ = {isa = PBXBuildFile; productRef = 99E62357B0BEA347158A5A6E /* PierKit */; };
+		69C95814FA047C3AA30FFEF8 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = F47F748F44F593A8F02149BE /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				385349FC0E673C2728956452 /* PierKit in Frameworks */,
+				69C95814FA047C3AA30FFEF8 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,6 +87,7 @@
 			name = Pier;
 			packageProductDependencies = (
 				99E62357B0BEA347158A5A6E /* PierKit */,
+				F47F748F44F593A8F02149BE /* Sparkle */,
 			);
 			productName = Pier;
 			productReference = B25ACBF42D017E90D09FD627 /* Pier.app */;
@@ -100,7 +103,7 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					A4B9F392B006A9A5862EABCC = {
-						DevelopmentTeam = "";
+						DevelopmentTeam = YWQ4TY4VR5;
 						ProvisioningStyle = Manual;
 					};
 				};
@@ -115,6 +118,7 @@
 			mainGroup = 19612F0795285F2F6B301AC8;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				D8E615286ADBE1B7C65C1DBF /* XCRemoteSwiftPackageReference "Sparkle" */,
 				8256E40DF677EB6C02A23FC2 /* XCLocalSwiftPackageReference "Packages/PierKit" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -282,16 +286,17 @@
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = "$(MARKETING_VERSION)";
+				DEVELOPMENT_TEAM = YWQ4TY4VR5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Pier;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Xiaolin";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = work.xiaolin.Pier;
 				PRODUCT_NAME = Pier;
 				SDKROOT = macosx;
@@ -304,19 +309,21 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Pier/Resources/Pier.entitlements;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = "Developer ID Application";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = "$(MARKETING_VERSION)";
+				DEVELOPMENT_TEAM = YWQ4TY4VR5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Pier;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Xiaolin";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
+				OTHER_CODE_SIGN_FLAGS = "--timestamp";
 				PRODUCT_BUNDLE_IDENTIFIER = work.xiaolin.Pier;
 				PRODUCT_NAME = Pier;
 				SDKROOT = macosx;
@@ -353,10 +360,26 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		D8E615286ADBE1B7C65C1DBF /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		99E62357B0BEA347158A5A6E /* PierKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PierKit;
+		};
+		F47F748F44F593A8F02149BE /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D8E615286ADBE1B7C65C1DBF /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

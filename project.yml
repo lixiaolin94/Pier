@@ -17,6 +17,11 @@ settings:
 packages:
   PierKit:
     path: Packages/PierKit
+  # 应用内自动更新（docs/RELEASE.md）。只链 App target，PierKit 保持零依赖；
+  # 代码用 `#if canImport(Sparkle) && !DEBUG` 包住，Debug 构建不含更新器。
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.9.0"
 targets:
   Pier:
     type: application
@@ -26,12 +31,26 @@ targets:
         type: syncedFolder
     dependencies:
       - package: PierKit
+      - package: Sparkle
+    info:
+      # 不放在 Pier/ 下：那是同步文件夹，Info.plist 会被当成资源拷进包里
+      path: Config/Info.plist
+      properties:
+        # Sparkle feed 跟随最新的 GitHub Release，每个 release 只带自己那一条
+        SUFeedURL: https://github.com/lixiaolin94/Pier/releases/latest/download/appcast.xml
+        # 与 Inbox 共用同一把 EdDSA 密钥（私钥在登录钥匙串 + CI secret SPARKLE_ED_PRIVATE_KEY）
+        SUPublicEDKey: "eaPIgZ2aNcGGEWHZVbVc1rmaP1jKoX4inFv+5k79TpA="
+        # 个人工具：按计划自动检查，不弹第二次启动时的询问框
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: work.xiaolin.Pier
         PRODUCT_NAME: Pier
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        # 版本规则见 docs/RELEASE.md：只递增最后一位，0.1.1 → 0.1.2 → …
+        MARKETING_VERSION: "0.1.1"
+        # CFBundleVersion 跟随版本号：Sparkle 用它比较新旧，每次发版都必须增长
+        CURRENT_PROJECT_VERSION: "$(MARKETING_VERSION)"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Pier
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
@@ -41,11 +60,15 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: Pier/Resources/Pier.entitlements
-        # 本地开发先用 ad-hoc 签名；要分发时在 Xcode 里选自己的 Team
+        # Debug 用 ad-hoc 签名，Release 用 Developer ID（经典证书，CI 也能用）
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
-        DEVELOPMENT_TEAM: ""
+        DEVELOPMENT_TEAM: YWQ4TY4VR5
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+      configs:
+        Release:
+          CODE_SIGN_IDENTITY: "Developer ID Application"
+          OTHER_CODE_SIGN_FLAGS: "--timestamp"
 schemes:
   Pier:
     build:

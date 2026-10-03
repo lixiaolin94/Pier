@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DeviceManager.shared.start()
+        AppUpdater.shared.start()
         _ = Services.transfers
         NotificationCenter.default.addObserver(self, selector: #selector(devicesDidChange(_:)), name: DeviceManager.devicesDidChange, object: nil)
         // 窗口恢复在这之前已经完成；没有恢复出窗口时才新开一个

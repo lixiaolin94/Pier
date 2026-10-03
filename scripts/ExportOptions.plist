@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 经典 Developer ID 证书手动签名：云管理的 Developer ID 证书只认 Account Holder 的
+	     交互会话，无头 CI 用不了（Inbox 2026-08-27 实测）。Pier 没有受限 entitlement，
+	     不需要 provisioning profile。 -->
+	<key>method</key>
+	<string>developer-id</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>Developer ID Application</string>
+	<key>teamID</key>
+	<string>YWQ4TY4VR5</string>
+</dict>
+</plist>

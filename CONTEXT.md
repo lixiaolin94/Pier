@@ -52,6 +52,11 @@
 - SD 卡根目录里有 spike 留下的 `g-move-to-0.bin`、`tomove.bin`（DBI 重新扫描后才出现），没有动，留给用户决定要不要删。
 - **下一阶段**：补完上面没验证的几项；>4 GB NSP 往 DBI 安装存储的分段写验证（需用户同意）；分栏视图（v1.1）。
 
+## 版本与发布（2026-10-03 定）
+- 当前版本 **0.1.1**（基线：完整跑通 MTP 文件管理的基本能力）。每次发版只把最后一位加 1（0.1.2、0.1.3…），只有用户说"这个版本 OK 了"才升前两位。
+- Sparkle 2 自动更新（与 Inbox 共用 EdDSA 密钥）；推送 tag `v<版本>` 后由 GitHub Actions 完成签名、公证和发布；一条命令发版：`scripts/bump_version.sh --push`。
+- 规则和门禁见 [docs/RELEASE.md](docs/RELEASE.md)，迭代计划见 [docs/ROADMAP.md](docs/ROADMAP.md)，改动记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 环境
 - macOS 27.0.1（Apple 芯片），Xcode 27.0，Swift 6.4
 - DBI 的 USB 信息：idVendor 0x057E（1406，Nintendo），idProduct 0x201D（8221），产品名 `DBI`，序列号 `XAW00000000000`

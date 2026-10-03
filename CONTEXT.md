@@ -1,7 +1,7 @@
 # Pier — 交接上下文
 
 **Pier**（2026-10-03 定名，取"码头"之意：设备插上来就像船靠岸，文件在这里装卸）：一个现代的 macOS 原生 Android MTP 文件传输 app，定位是 Android File Transfer（AFT）的现代替代品。
-- **通用**：面向所有 MTP 设备（Android 手机/平板、Switch 上的 DBI 等），不只是 DBI。早期叫 SwitchMTP，是因为最初的需求是给 DBI 传文件；仓库目录名暂时没改。
+- **通用**：面向所有 MTP 设备（Android 手机/平板、Switch 上的 DBI 等），不只是 DBI。早期叫 SwitchMTP，是因为最初的需求是给 DBI 传文件。2026-10-03 起仓库迁到 `/Users/xiaolin/Documents/Xcode/Pier`（带完整历史，默认分支 `main`）；旧目录 `SwitchMTP` 只作存档。
 - **学习 AFT 的体验**：插上设备自动弹出窗口、即插即用。
 - **更现代**：**AppKit 原生界面（不用 SwiftUI）**，Finder 风格的单窗口加原生多 tab，支持拖放；交互优先，前台保持流畅，耗时任务放后台并保证可靠。功能范围见 [docs/SCOPE.md](docs/SCOPE.md)。
 - 技术路线：**方案 A（ImageCaptureCore + requestSendPTPCommand）**，已验证可行，详见末尾「验证记录」。

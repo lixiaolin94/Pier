@@ -9,6 +9,22 @@
 
 当前阶段：可行性验证已完成，下一步是正式开发。注意：下面的验证数据都是用 Switch DBI 测的，换成普通 Android 手机时，MTP 行为（文件名、缓存、64 位扩展支持等）需要另外验证。
 
+## 工程结构（2026-10-03 搭好骨架）
+- `project.yml`：xcodegen 配置，执行 `xcodegen generate` 生成 `Pier.xcodeproj`（已提交）。`Pier/` 是同步文件夹，增删源文件不用重新生成，只有改 `project.yml` 才需要。
+- `Packages/PierKit/`：本地 Swift Package，纯逻辑、不依赖 AppKit，可以 `swift test`。
+  - `PTP/`：操作码、编解码（Reader/Writer、命令/响应 container）、数据集（DeviceInfo/StorageInfo/ObjectInfo）。
+  - `Session/`：`PTPTransport` 协议；`ChannelScheduler`（按优先级分配指令通道，排队时可取消）；`MTPSession`（`send` 单条、`exclusive` 连续执行一组、`hasWaiters(above:)` 给长任务判断要不要让路）；`MTPOperations`（列目录、分批流式列出、建文件夹、改名、删除、分块读取）。
+  - `Device/`：`ImageCaptureTransport`（经 ptpcamerad，带超时，拦截 ≥4 GB 的 outData）、`DeviceManager` + `MTPDevice`（ICDeviceBrowser 发现设备、开会话、GetDeviceInfo 判断是否为 MTP、读存储列表，变化时发 `devicesDidChange` 通知）。
+- `Pier/`：AppKit 界面，纯代码，不用 storyboard/xib，Swift 6 严格并发，最低 macOS 13，Bundle ID `work.xiaolin.Pier`。
+  - `App/`：`main.swift`、`AppDelegate`（窗口管理）、`MainMenu`（Finder 式菜单与快捷键；`BrowserActions` @objc 协议定义沿响应链分发的动作）。
+  - `Browser/`：`BrowserWindowController`（一个窗口/tab：位置、前进/后退历史、工具栏、导航动作）、`BrowserSplitViewController`、`ContentViewController`（列表 + 路径栏 + 状态栏 + 未连接占位页）、`BrowserLocation`。
+  - `Sidebar/`：source list，设备 → 存储，⌘单击在新 tab 打开，右键可"在标签页中打开所有存储"、推出。
+  - `FileList/`：`NSOutlineView` 列表视图，分批流式显示、可展开文件夹（按需加载）、列排序/显示隐藏、搜索过滤、双击/⌘↓ 进入、⌘双击在新 tab 打开。
+- 构建：`xcodebuild -project Pier.xcodeproj -scheme Pier -derivedDataPath build/DerivedData build`，产物在 `build/DerivedData/Build/Products/Debug/Pier.app`。
+- 已实机验证（DBI）：设备发现、8 个存储、列目录（Installed games 115 项边读边显示）、展开、导航、返回、原生 tab。
+- **下一阶段**（按 docs/SCOPE.md）：传输引擎（下载/上传队列、断点续传、进度）→ 拖放（`NSFilePromiseProvider` / 文件 URL）→ ⌘C/⌘V → 新建文件夹/改名/删除 → Quick Look/打开 → 显示简介 → 设备怪癖档案 → 图标视图 → 窗口状态恢复。
+- 已知待办：PTP 事件（对象增删）还没接；指令超时后会话的恢复策略还没做；侧边栏"收藏"分组未做。
+
 ## 环境
 - macOS 27.0.1（Apple 芯片），Xcode 27.0，Swift 6.4
 - DBI 的 USB 信息：idVendor 0x057E（1406，Nintendo），idProduct 0x201D（8221），产品名 `DBI`，序列号 `XAW00000000000`

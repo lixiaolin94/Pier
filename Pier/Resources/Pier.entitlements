@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- v1 不开 App Sandbox（见 docs/SCOPE.md）；ImageCaptureCore 访问 PTP 设备不需要额外 entitlement -->
+</dict>
+</plist>

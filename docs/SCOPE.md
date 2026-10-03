@@ -12,7 +12,7 @@
 
 ## 系统版本
 
-- **最低支持 macOS 13 Ventura（建议值，待确认）**。理由：
+- **最低支持 macOS 13 Ventura（已确认）**。理由：
   - 需要的 AppKit 组件最晚到 macOS 12 才有（`NSSearchToolbarItem`），13 已覆盖；
   - `OSAllocatedUnfairLock`（13+）可以做轻量的线程安全状态；
   - ImageCaptureCore 的 `requestSendPTPCommand:outData:completion:` 只要求 10.15。
@@ -82,8 +82,8 @@
 | 操作 | 交互 | v1 | 备注 |
 |---|---|---|---|
 | 浏览 / 打开文件夹 | 双击、⌘↓、⌘↑ 返回上级 | ✅ | |
-| **下载**（设备 → Mac） | 拖到 Finder/桌面；右键「下载到…」；⌘C 后在 Finder 里 ⌘V（可选） | ✅ | 拖拽用 `NSFilePromiseProvider`，松手后才在后台传输；Finder 中显示文件进度 |
-| **上传**（Mac → 设备） | 从 Finder 拖进列表或文件夹；拖到侧边栏的存储或路径栏上；菜单「上传…」 | ✅ | 支持文件夹（递归创建）。>4 GB 文件走分段写（SendPartialObject）；设备不支持时给出明确提示 |
+| **下载**（设备 → Mac） | 拖到 Finder/桌面；右键「下载到…」；在 Pier 里 ⌘C，到 Finder 里 ⌘V | ✅ | 拖拽用 `NSFilePromiseProvider`，松手后才在后台传输；Finder 中显示文件进度 |
+| **上传**（Mac → 设备） | 从 Finder 拖进列表或文件夹；拖到侧边栏的存储或路径栏上；在 Finder 里 ⌘C，到 Pier 里 ⌘V；菜单「上传…」 | ✅ | 支持文件夹（递归创建）。>4 GB 文件走分段写（SendPartialObject）；设备不支持时给出明确提示 |
 | 打开 / 预览 | 空格 Quick Look；双击用默认 app 打开 | ✅ | 先下载到缓存目录（只下载需要的部分），再交给 QL 或 NSWorkspace |
 | 新建文件夹 | ⌘⇧N，创建后直接进入改名状态 | ✅ | |
 | 改名 | 回车 / 点击名称，行内编辑 | ✅ | 按设备能力预检（如 DBI 不能改成非 ASCII 名字），不合法时在编辑框里直接提示 |
@@ -127,8 +127,9 @@
 - App Sandbox / 上架 App Store（架构上保留可能性，v1 不追求）
 - 设备内复制
 
-## 待确认
+## 已确认的决定（2026-10-03）
 
-1. 最低系统版本：建议 **macOS 13**，是否需要更低（比如 12 或 11）？
-2. 侧边栏收藏、视图偏好等用户数据存在 `UserDefaults` 还是 Application Support 下的文件里？（建议：偏好设置用 UserDefaults，收藏和断点续传状态用文件）
-3. 是否需要 Finder 式的"⌘C / ⌘V 复制粘贴"下载/上传（除拖放之外）？
+1. 最低系统版本：**macOS 13**。
+2. 用户数据：偏好设置放 `UserDefaults`；收藏和断点续传状态放 `~/Library/Application Support/Pier/` 下的文件。
+3. **支持 Finder 式的 ⌘C / ⌘V**：在 Pier 里 ⌘C 后到 Finder 里 ⌘V 就是下载（剪贴板用 file promise）；在 Finder 里 ⌘C 后到 Pier 里 ⌘V 就是上传（剪贴板里是文件 URL）。
+   - 技术风险：Finder 粘贴时是否接受剪贴板里的 file promise 需要先做实验验证。如果不接受，备选方案是 ⌘C 时把文件先下载到缓存再放文件 URL（小文件），大文件则提示用拖放或「下载到…」。

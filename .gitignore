@@ -2,3 +2,8 @@
 *.xcuserstate
 DerivedData/
 .DS_Store
+Pier.xcodeproj/xcuserdata/
+Pier.xcodeproj/project.xcworkspace/xcuserdata/
+Packages/PierKit/.build/
+Packages/PierKit/.swiftpm/
+build/

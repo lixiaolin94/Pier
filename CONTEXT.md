@@ -112,6 +112,8 @@ GetObjectPropsSupported(0x3000) = `DC41 PersistentUID, DC01 StorageID, DC0B Pare
 4. **SendObjectInfo 之后如果没有 SendObject，会留下 0 字节的空文件**（4 次崩溃测试各留下一个）。
 5. **重复 handle**：通过 SendObjectInfo 新建的对象，在 DBI 第一次扫描该目录时会再被登记一次（同名文件出现新旧两个 handle，之后不再增长）。正式实现需要按 (parent, name) 去重，或者上传后重新枚举目录。handle 只在 DBI 的这次 MTP 会话内有效；ptpcamerad 会一直保持 PTP 会话，所以多次运行本工具时 handle 是连续的。
 6. 没有修改时间属性；Album 存储为空。
+7. 根目录对象的 ObjectInfo.ParentObject 填的是**存储 ID**（如 0x00010001），不是规范里的 0 / 0xFFFFFFFF。
+8. 更多增删改查相关的怪癖见下一节。
 
 ### 建议：选方案 A
 理由：
@@ -123,4 +125,38 @@ GetObjectPropsSupported(0x3000) = `DC41 PersistentUID, DC01 StorageID, DC0B Pare
 1. **先补验证 >4 GB 游戏安装**（需要用户明确同意往 DBI 安装存储写入，并准备一个 >4 GB 的 NSP）：在 `5: SD Card install` 用 SendObjectInfo（size 字段填 0xFFFFFFFF，或者用 SendObjectPropList 0x9808 带 64 位 ObjectSize）+ 首块 SendObject + SendPartialObject 安装，看 DBI 能否识别并装好。≤4 GB 的 NSP 可以单次 SendObject，按目前数据应该没问题（同样建议先用一个小游戏实测安装）。
    - 如果 DBI 安装存储不接受分段写：>4 GB 游戏只能用方案 B 的 USB 直连路径（或者让用户在 DBI 里改用别的安装方式），其余功能仍走方案 A。
 2. 开始正式 app：SwiftUI + ImageCaptureCore 的 PTP/MTP 封装层（可以直接复用 `spike/` 里的 Reader/Writer、数据集解析和 `send()`），注意事项见上面「关键限制与 DBI 怪癖」。
-3. 测试残留：SD 卡 `/SwitchMTP-spike/` 里有约 9.5 GiB（10.2 GB）测试文件（含 4 个 0 字节文件），确认后可在 DBI 或 Mac 上删除。
+3. 测试残留：已清理（见下方「增删改查稳定性」）。
+
+### 增删改查稳定性（2026-10-03 补充，`ptpspike crud / probe-* / rmtest`）
+所有写和删都只发生在 `1: SD Card/SwitchMTP-spike/` 下，代码里有保护：删除前沿 parent 链确认对象在测试目录内。测试结束后已用 `rmtest` 递归删除整个测试目录（子项 20 个，0 失败），SD 根目录恢复为原来的 20 项。
+
+**随机压测**（`crud … 300`）：300 轮，每轮新建（1 B–2 MB 随机内容，ASCII/中文/emoji 文件名）+ GetObject 全量回读校验，再随机挑一个文件做改写/截断/改名/移动/删除，每 20 轮按 handle 核对目录列表。约 3500 条指令，58.8 s，**没有挂起、断连或数据错误**：
+| 操作 | 成功/失败 | 平均延迟 | 说明 |
+|---|---|---|---|
+| create（SendObjectInfo+SendObject） | 300/0 | 125 ms | 小文件也有约 110 ms 固定开销，应该是 DBI 在关闭文件 |
+| read（GetObject+校验） | 300/0 | 14 ms | |
+| edit（BeginEdit+SendPartialObject+EndEdit，含追加） | 45/0 | 138 ms | |
+| truncate（BeginEdit+TruncateObject 0x95C3+EndEdit） | 65/0 | 15 ms | |
+| rename（SetObjectPropValue 0xDC07，ASCII 新名） | 37/0 | 49 ms | |
+| move（MoveObject，ASCII 文件名） | 15/0 | 18 ms | 语义见下 |
+| move（非 ASCII 文件名） | 0/29 | — | 全部 0x2005，属已知限制 |
+| delete（DeleteObject） | 300/0 | 24 ms | |
+| list-verify | 15/0 | 88 ms | |
+
+**确认的 DBI 行为（正式开发必须处理）**：
+1. **文件名按"去掉非 ASCII 字符后的名字"判重**：中文、日文、韩文、emoji、é 等文件名本身都能写，但同一目录里两个名字去字后相同就会冲突，SendObjectInfo 返回 0x2002。例如有了 `游戏.nsp` 之后再建 `存档.nsp` 就失败（两者都是 `.nsp`）；有 `a中.bin` 后 `a文.bin`、`a.bin` 都会失败。上传前要做这个检查，并给出友好提示。
+2. **DBI 扫描目录时登记的条目，名字里的非 ASCII 字符会被删掉**（`中文名.bin` 显示成 `.bin`，`emoji-🎮.bin` 显示成 `emoji-.bin`），但用这个 handle 读取正常（DBI 内部记的是真实路径）。也就是说，**SD 卡上原有的中文名文件，在 MTP 里看到的名字是残缺的**。这是 DBI 自身的问题，AFT 也一样。界面上可以提示"名称可能不完整"。
+3. **改名成非 ASCII 名字返回 0x2005**；改成 ASCII 名字可以（文件和目录都行，0xDC07/0xDC44 都可用）。**非 ASCII 名字的文件不能 MoveObject**（0x2005）；目录名含非 ASCII 不影响移动。
+4. **MoveObject 物理上移动正确，但 DBI 缓存不更新**（用"首次枚举会扫描文件系统"的方法确认了物理位置）：
+   - 原 handle 的 ObjectInfo.parent 不变，仍列在原目录里，仍可读；
+   - 目标目录如果已经枚举过，移动后**列表里看不到这个文件**（在目标目录新建文件也不会触发重新扫描）；只有首次枚举时才会扫出来；
+   - parent 参数传 0 也返回 OK，行为不明。**不要传 0**；
+   - 移到已有同名文件的目录返回 0x2005。
+   - 正式实现：移动成功后由 app 自己更新目录模型，不要依赖重新枚举。或者干脆先不提供"移动"功能（设备不支持 CopyObject）。
+5. **0 字节文件**：SendObject 一定返回 0x2002（outData 传空 Data 或 nil 都一样），但文件其实已经建出来了。上传 0 字节文件时只发 SendObjectInfo 即可，或者把这个 0x2002 当作成功处理。
+6. **重复 handle**：在一个还没枚举过的目录里新建文件，之后第一次枚举时 DBI 会再登记一个扫描条目（名字可能被删字）。两个 handle 都能读，删掉其中一个后另一个仍有效，也能再删一次（返回 OK）。删除后，同名的扫描条目偶尔还会留在列表里（300 轮里出现 3 次）。
+7. **删除非空目录会递归删除**，没有确认步骤。app 必须自己加确认。
+8. **StorageInfo 的剩余空间不会实时更新**：写入约 10 GB 再删除，前后一直显示 39053 MB，应该是 DBI 会话开始时缓存的值。显示剩余空间时要注明，或在 DBI 重连后刷新。
+9. SetObjectPropValue 虽然不在 GetObjectPropsSupported 里，但 0xDC07 可以写；GetObjectPropDesc(0xDC07) 返回 0xA80A，GetObjectPropDesc(0xDC44) 显示可写。
+
+**总体判断**：MTP 读写本身很稳（数据零错误，没有挂起）。问题都集中在 DBI 的名字处理和目录缓存上，这些和走方案 A 还是方案 B 无关。正式 app 需要在本地维护目录模型，并做文件名预检。**仍然建议方案 A。**

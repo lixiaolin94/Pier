@@ -10,6 +10,8 @@
 //                                      （SRC_FILE 指定时 mmap 该文件作为数据）
 //   pwrite <storage> <dir> <chunkMB>   分段写：SendObject 首块 + SendPartialObject(0x95C2)，dir 必须是测试目录
 //   cmp <handle> <offsetMB...>         比对设备端与 SRC_FILE 在各偏移处的 1 MB
+//   crud <storage> <testDir> <n>       增删改查稳定性测试（只在 testDir 下的 crud-* 子目录里操作）
+//   rmtest <storage> <testDir>         递归删除 SwitchMTP-spike 测试目录（有名字/位置保护）
 //
 // 环境变量：PTP_VERBOSE=1 打印每条指令的原始收发；LS_MAX 限制 ls 输出条数。
 // 运行前先退出 Android File Transfer，让 ptpcamerad 持有设备。
@@ -85,6 +87,8 @@ func parseNum(_ s: String) -> UInt64 {
 }
 func mb(_ bytes: Int, _ secs: Double) -> String { String(format: "%.2f MB/s", Double(bytes) / 1_048_576 / secs) }
 
+final class Box: @unchecked Sendable { var value = false }
+
 struct PTPResponse {
     let code: UInt16
     let params: [UInt32]
@@ -93,6 +97,7 @@ struct PTPResponse {
 
 struct PTPError: Error, CustomStringConvertible {
     let description: String
+    var code: UInt16 = 0   // 设备返回的 response code；0 表示非设备错误
 }
 
 // MARK: - 设备会话
@@ -210,6 +215,13 @@ final class Spike: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate {
         txid += 1
         params.forEach { w.u32($0) }
         let cmd = w.d
+        // 看门狗：单条指令超过 CMD_TIMEOUT 秒（默认 60）没回应就判定设备挂起，直接退出
+        let done = Box()
+        let limit = Double(ProcessInfo.processInfo.environment["CMD_TIMEOUT"] ?? "60")!
+        DispatchQueue.main.asyncAfter(deadline: .now() + limit) {
+            if !done.value { print("❌ 指令 \(hex(code)) \(params.map { hex($0, 8) }) 超过 \(Int(limit))s 无响应，设备疑似挂起"); exit(3) }
+        }
+        defer { done.value = true }
         let (resp, data): (Data, Data) = try await withCheckedThrowingContinuation { c in
             cam.requestSendPTPCommand(cmd, outData: out) { respData, ptpRespData, error in
                 if let error { c.resume(throwing: error) } else { c.resume(returning: (ptpRespData, respData)) }
@@ -224,7 +236,7 @@ final class Spike: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate {
             print("  → \(hex(code)) \(params.map { hex($0, 8) }) out=\(out?.count ?? 0)B | resp len=\(len) type=\(type) code=\(hex(rc)) params=\(ps.map { hex($0, 8) }) data=\(data.count)B head=\((data.prefix(16) as NSData))")
         }
         guard rc == 0x2001 else {
-            throw PTPError(description: "指令 \(hex(code)) 失败，response=\(hex(rc))（raw \(resp as NSData)）")
+            throw PTPError(description: "指令 \(hex(code)) 失败，response=\(hex(rc))", code: rc)
         }
         return PTPResponse(code: rc, params: ps, data: data)
     }
@@ -578,6 +590,18 @@ Task { @MainActor in
                 if o >= 1 << 32 { let w = Int(o - (1 << 32)); wrap = file.subdata(in: w..<(w + d.count)) == d ? "等于源文件 offset-4GB 处 ⚠️" : "否" }
                 print("  @\(a)MB 收到 \(d.count)B，与源一致：\(d == exp ? "✅" : "❌")，回绕检查：\(wrap)")
             }
+        case "crud":
+            try await spike.crud(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])), iterations: Int(args[3])!)
+        case "probe-names":
+            try await spike.probeNames(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
+        case "probe-edit":
+            try await spike.probeEdit(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
+        case "probe-chars":
+            try await spike.probeChars(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])), chars: Array(args.dropFirst(3)))
+        case "probe-move":
+            try await spike.probeMove(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
+        case "rmtest":
+            try await spike.rmtest(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
         case "pwrite":
             try await spike.pwrite(storage: UInt32(parseNum(args[1])), dir: UInt32(parseNum(args[2])), chunk: Int(args[3])! * 1_048_576)
         default: print("未知子命令 \(cmdName)")

@@ -151,3 +151,112 @@ extension MTPSession {
         return try await send(command, priority: priority).data
     }
 }
+
+/// 路径上的一级：句柄只在本次 MTP 会话内有效，名字用来在重连后重新定位
+public struct MTPPathComponent: Sendable, Hashable, Codable {
+    public var handle: UInt32
+    public var name: String
+
+    public init(handle: UInt32, name: String) {
+        self.handle = handle
+        self.name = name
+    }
+}
+
+/// 递归搜索的一条结果
+public struct MTPSearchHit: Sendable {
+    public var object: MTPObject
+    /// 从搜索起点到这个对象所在文件夹的路径（不含对象本身）
+    public var folderPath: [MTPPathComponent]
+}
+
+extension Array where Element == MTPObject {
+    /// 按名字去重，保留先出现的。DBI 会给新建的对象再登记一个重复 handle（见 CONTEXT.md），同一文件夹里名字本来就唯一。
+    public func dedupedByName() -> [MTPObject] {
+        var seen = Set<String>()
+        return filter { seen.insert($0.name).inserted }
+    }
+}
+
+extension MTPSession {
+    /// 读取单个对象的信息
+    public func object(_ handle: UInt32, priority: RequestPriority) async throws -> MTPObject {
+        guard let object = try await objects([handle], priority: priority).first else {
+            throw PTPError.response(.invalidObjectHandle, .getObjectInfo)
+        }
+        return object
+    }
+
+    /// 对象的真实大小（优先读 64 位的 ObjectSize 属性）
+    public func objectSize(_ handle: UInt32, priority: RequestPriority) async throws -> UInt64 {
+        if deviceInfo.supports(.getObjectPropValue),
+           let data = try? await send(PTPCommand(.getObjectPropValue, [handle, UInt32(MTPObjectProperty.objectSize.rawValue)]), priority: priority).data {
+            var r = PTPDataReader(data)
+            if let size = try? r.u64() { return size }
+        }
+        let info = try PTPObjectInfo(data: try await send(PTPCommand(.getObjectInfo, [handle]), priority: priority).data)
+        return UInt64(info.compressedSize)
+    }
+
+    /// 一次读出文件夹的全部内容（已按名字去重）
+    public func children(storage: UInt32, parent: UInt32, priority: RequestPriority) async throws -> [MTPObject] {
+        var result: [MTPObject] = []
+        for try await batch in listChildren(storage: storage, parent: parent, priority: priority, batchSize: 128) {
+            result += batch
+        }
+        return result.dedupedByName()
+    }
+
+    /// 移动对象到同一设备的另一个文件夹。不要把 parent 传 0（DBI 会返回 OK 但行为不明）。
+    public func move(_ handle: UInt32, toStorage storage: UInt32, parent: UInt32, priority: RequestPriority = .userInitiated) async throws {
+        precondition(parent != 0, "MoveObject 的 parent 不能为 0")
+        try await send(PTPCommand(.moveObject, [handle, storage, parent]), priority: priority)
+    }
+
+    /// 按名字逐级查找路径（重连后句柄失效时用）。找不到返回 nil；空路径返回 nil（表示存储根目录）。
+    public func resolve(path names: [String], storage: UInt32, priority: RequestPriority) async throws -> [MTPPathComponent]? {
+        var parent = PTPHandle.root
+        var result: [MTPPathComponent] = []
+        for name in names {
+            let children = try await children(storage: storage, parent: parent, priority: priority)
+            guard let match = children.first(where: { $0.name == name }) else { return nil }
+            result.append(MTPPathComponent(handle: match.handle, name: match.name))
+            parent = match.handle
+        }
+        return result
+    }
+
+    /// 在某个文件夹下递归搜索名字包含 `query` 的项目（广度优先，后台优先级）。每读完一个文件夹回调一批结果。
+    public func search(storage: UInt32, under root: UInt32, matching query: String,
+                       priority: RequestPriority = .background, folderLimit: Int = 20_000) -> AsyncThrowingStream<[MTPSearchHit], Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var queue: [(handle: UInt32, path: [MTPPathComponent])] = [(root, [])]
+                    var visited = 0
+                    while !queue.isEmpty, visited < folderLimit {
+                        try Task.checkCancellation()
+                        let (folder, path) = queue.removeFirst()
+                        visited += 1
+                        let items: [MTPObject]
+                        do {
+                            items = try await children(storage: storage, parent: folder, priority: priority)
+                        } catch let e as PTPError where e.responseCode != nil {
+                            continue   // 某个文件夹读不了（权限等），跳过
+                        }
+                        let hits = items.filter { $0.name.localizedCaseInsensitiveContains(query) }
+                            .map { MTPSearchHit(object: $0, folderPath: path) }
+                        if !hits.isEmpty { continuation.yield(hits) }
+                        for item in items where item.isFolder {
+                            queue.append((item.handle, path + [MTPPathComponent(handle: item.handle, name: item.name)]))
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}

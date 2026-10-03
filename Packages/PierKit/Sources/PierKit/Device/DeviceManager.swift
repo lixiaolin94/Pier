@@ -33,6 +33,11 @@ public final class MTPDevice: Identifiable {
     }
 
     public var deviceInfo: PTPDeviceInfo? { session?.deviceInfo }
+    public var quirks: DeviceQuirks? { session?.quirks }
+    public var isReady: Bool { if case .ready = state { true } else { false } }
+
+    fileprivate var probing = false
+    fileprivate var storageReloadTask: Task<Void, Never>?
 
     /// 重新读取存储列表（容量等）
     public func reloadStorages() async throws {
@@ -55,6 +60,8 @@ public final class DeviceManager: NSObject {
 
     /// 设备增删、状态变化、存储变化都会发这个通知；`object` 是 DeviceManager，userInfo["device"] 是变化的设备（如有）
     public static let devicesDidChange = Notification.Name("work.xiaolin.Pier.devicesDidChange")
+    /// 设备发来 PTP 事件（对象增删等）。userInfo["device"] 是 MTPDevice，userInfo["event"] 是 PTPEvent
+    public static let deviceEvent = Notification.Name("work.xiaolin.Pier.deviceEvent")
 
     public private(set) var devices: [MTPDevice] = []
 
@@ -72,6 +79,61 @@ public final class DeviceManager: NSObject {
     }
 
     public func device(withID id: String) -> MTPDevice? { devices.first { $0.id == id } }
+
+    /// 按持久标识找已就绪的设备（传输续传、收藏、窗口恢复用）
+    public func readyDevice(persistentID: String) -> MTPDevice? {
+        devices.first { $0.persistentID == persistentID && $0.isReady }
+    }
+
+    /// 退出前关闭所有会话，把设备干净地交还给 ptpcamerad（进程被强行结束时设备可能一直处于占用状态）
+    public func closeAllSessions() {
+        for device in devices { device.camera.requestCloseSession() }
+    }
+
+    /// 重新连接：关闭会话后重新打开。用于设备长时间无响应之后恢复。
+    public func reconnect(_ device: MTPDevice) {
+        let camera = device.camera
+        log.info("reconnecting \(device.name, privacy: .public)")
+        camera.requestCloseSession()
+        remove(device)
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            connect(camera)
+        }
+    }
+
+    /// 某条指令超时后：用 GetDeviceInfo 探一下，设备仍无响应就重新连接
+    fileprivate func handleTimeout(_ device: MTPDevice) {
+        guard !device.probing, let session = device.session, devices.contains(where: { $0 === device }) else { return }
+        device.probing = true
+        log.error("command timed out on \(device.name, privacy: .public), probing")
+        Task {
+            defer { device.probing = false }
+            do {
+                _ = try await session.send(PTPCommand(.getDeviceInfo), priority: .interactive)
+            } catch {
+                guard devices.contains(where: { $0 === device }) else { return }
+                reconnect(device)
+            }
+        }
+    }
+
+    fileprivate func handle(_ event: PTPEvent, from device: MTPDevice) {
+        log.debug("event \(event.description, privacy: .public) from \(device.name, privacy: .public)")
+        switch event.code {
+        case .storeAdded, .storeRemoved, .storageInfoChanged, .storeFull:
+            // 合并短时间内的多个事件
+            device.storageReloadTask?.cancel()
+            device.storageReloadTask = Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+                try? await device.reloadStorages()
+            }
+        default:
+            break
+        }
+        NotificationCenter.default.post(name: Self.deviceEvent, object: self, userInfo: ["device": device, "event": event])
+    }
 
     /// 关闭会话（"推出"）。设备仍插着，但从列表中移除，直到重新插拔。
     public func eject(_ device: MTPDevice) {
@@ -106,7 +168,7 @@ public final class DeviceManager: NSObject {
                     device.openContinuation = c
                     camera.requestOpenSession()
                 }
-                let transport = ImageCaptureTransport(device: camera)
+                let transport = makeTransport(camera, for: device)
                 let infoResp = try await transport.execute(PTPCommand(.getDeviceInfo), outData: nil)
                 guard infoResp.code == .ok else { throw PTPError.response(infoResp.code, .getDeviceInfo) }
                 let info = try PTPDeviceInfo(data: infoResp.data)
@@ -126,6 +188,14 @@ public final class DeviceManager: NSObject {
                 device.set(state: .failed(String(describing: error)))
             }
             notifyChange(device)
+        }
+    }
+
+    private func makeTransport(_ camera: ICCameraDevice, for device: MTPDevice) -> ImageCaptureTransport {
+        ImageCaptureTransport(device: camera) { [weak self, weak device] in
+            Task { @MainActor in
+                if let self, let device { self.handleTimeout(device) }
+            }
         }
     }
 
@@ -177,7 +247,12 @@ extension DeviceManager: ICCameraDeviceDelegate {
     nonisolated public func cameraDevice(_ camera: ICCameraDevice, didReceiveMetadata metadata: [AnyHashable: Any]?, for item: ICCameraItem, error: (any Error)?) {}
     nonisolated public func cameraDevice(_ camera: ICCameraDevice, didRenameItems items: [ICCameraItem]) {}
     nonisolated public func cameraDeviceDidChangeCapability(_ camera: ICCameraDevice) {}
-    nonisolated public func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {}
+    nonisolated public func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {
+        guard let event = try? PTPEvent(container: eventData) else { return }
+        MainActor.assumeIsolated {
+            if let d = self.device(for: camera), d.isReady { handle(event, from: d) }
+        }
+    }
     nonisolated public func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {}
     nonisolated public func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) {}
 }

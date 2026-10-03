@@ -3,11 +3,9 @@ import PierKit
 
 /// 一个浏览位置：哪台设备、哪个存储、哪个文件夹
 struct BrowserLocation: Equatable {
-    struct Folder: Equatable {
-        var handle: UInt32
-        var name: String
-    }
+    typealias Folder = MTPPathComponent
 
+    /// 本次连接内的设备 ID（`MTPDevice.id`）
     var deviceID: String
     var storageID: UInt32
     /// 从存储根目录到当前文件夹的路径；空数组表示存储根目录
@@ -43,5 +41,36 @@ extension BrowserLocation {
     @MainActor var title: String {
         if let last = path.last { return last.name }
         return resolved?.storage.displayName ?? "Pier"
+    }
+
+    /// 可以跨连接保存的形式（设备用持久标识，路径用名字）
+    @MainActor var stored: StoredLocation? {
+        guard let device = DeviceManager.shared.device(withID: deviceID) else { return nil }
+        return StoredLocation(deviceID: device.persistentID, deviceName: device.name, storageID: storageID,
+                              storageName: resolved?.storage.displayName ?? "", path: path.map(\.name))
+    }
+}
+
+/// 跨连接、跨启动保存的位置：用于收藏、窗口恢复、每个文件夹的显示偏好
+struct StoredLocation: Codable, Hashable {
+    /// `MTPDevice.persistentID`
+    var deviceID: String
+    var deviceName: String
+    var storageID: UInt32
+    var storageName: String
+    var path: [String]
+
+    var name: String { path.last ?? storageName }
+
+    /// 偏好设置用的键
+    var key: String { ([deviceID, String(storageID)] + path).joined(separator: "/") }
+
+    /// 设备已就绪时，按名字逐级找回句柄，得到一个可浏览的位置
+    @MainActor func resolve() async -> BrowserLocation? {
+        guard let device = DeviceManager.shared.readyDevice(persistentID: deviceID), let session = device.session,
+              device.storages.contains(where: { $0.id == storageID }) else { return nil }
+        if path.isEmpty { return BrowserLocation(deviceID: device.id, storageID: storageID) }
+        guard let components = try? await session.resolve(path: path, storage: storageID, priority: .interactive) else { return nil }
+        return BrowserLocation(deviceID: device.id, storageID: storageID, path: components)
     }
 }

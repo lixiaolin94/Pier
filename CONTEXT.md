@@ -22,8 +22,35 @@
   - `FileList/`：`NSOutlineView` 列表视图，分批流式显示、可展开文件夹（按需加载）、列排序/显示隐藏、搜索过滤、双击/⌘↓ 进入、⌘双击在新 tab 打开。
 - 构建：`xcodebuild -project Pier.xcodeproj -scheme Pier -derivedDataPath build/DerivedData build`，产物在 `build/DerivedData/Build/Products/Debug/Pier.app`。
 - 已实机验证（DBI）：设备发现、8 个存储、列目录（Installed games 115 项边读边显示）、展开、导航、返回、原生 tab。
-- **下一阶段**（按 docs/SCOPE.md）：传输引擎（下载/上传队列、断点续传、进度）→ 拖放（`NSFilePromiseProvider` / 文件 URL）→ ⌘C/⌘V → 新建文件夹/改名/删除 → Quick Look/打开 → 显示简介 → 设备怪癖档案 → 图标视图 → 窗口状态恢复。
-- 已知待办：PTP 事件（对象增删）还没接；指令超时后会话的恢复策略还没做；侧边栏"收藏"分组未做。
+
+## v1 功能实现（2026-10-03 第二轮）
+**PierKit**（`swift test` 26 项全过，`Tests/PierKitTests/FakeDevice.swift` 是内存假设备，模仿 DBI 的行为）：
+- `Device/DeviceQuirks`：设备怪癖档案（DBI：只能改成 ASCII 名、判重忽略非 ASCII、移动后目录列表不刷新、剩余空间是缓存值、0 字节文件只发 SendObjectInfo、安装存储不走分段写），附带文件名预检和"保留两者"命名。
+- `Transfer/TransferEngine`：下载按块续传（16 MB，有前台请求排队时自动降到 2 MB）；上传 ≤4 GB 用单次 SendObject（进度按经验速度估算），DBI 普通存储 >32 MB 和所有 >4 GB 的文件走分段写（SendObjectInfo 只声明首块大小，Android 按声明大小收数据）；写完回读大小，不一致就删掉并报错（FAT32 截断）。
+- `Transfer/TransferQueue` + `Transfer`：每台设备串行、设备之间并行；文件夹展开成条目逐个完成；暂停/继续/取消/重试；断线进入"等待设备"、重连后自动继续；未完成任务存到 `~/Library/Application Support/Pier/transfers.json`，重启后以"已暂停"恢复；下载先写 `名字.pierdownload` 再原子改名，并用 `NSProgress.publish` 在 Finder 里显示进度；传输期间 `beginActivity` 防休眠。
+- PTP 事件（对象增删、存储变化）转成 `DeviceManager.deviceEvent` 通知；指令超时后用 GetDeviceInfo 探测，无响应就自动 `reconnect`；退出时 `closeAllSessions()`。
+- 新增操作：`object`、`objectSize`、`children`（按名字去重）、`move`、`resolve(path:)`（重连后按名字找回句柄）、`search`（递归搜索）。
+
+**App**：
+- `FileList/FolderContents`：列表和图标视图共用的本地目录模型，操作后直接更新；`ModelEvents` 通知让多个 tab 同步；`MoveLedger` 记下 DBI 上的移动，列目录时补上。
+- 列表视图（行内改名，回车改名，非法名字在编辑框旁提示）+ 图标视图（`NSCollectionView`，≤24 MB 的图片在后台生成缩略图）；按文件夹记住显示方式。
+- 拖放：拖到 Finder 用 `RemoteFilePromiseProvider`（同时带 `.pierItem`，窗口内拖动 = 移动）；从 Finder 拖进列表、文件夹行、图标、路径栏某一级、侧边栏的存储/收藏 = 上传；把文件夹拖进「收藏」分组 = 添加收藏。⌘C/⌘V 同样走这两种剪贴板内容。
+- Finder 式冲突对话框（替换 / 保留两者 / 跳过 / 停止，可应用到全部；只是按 DBI 规则冲突时不提供"替换"）。
+- 新建文件夹（⇧⌘N，建好后直接进入改名）、删除（必须确认，提示文件夹会递归删除）、显示简介（⌘I）、Quick Look（空格 / ⌘Y，先下载到缓存，>512 MB 不自动下载）、双击用默认 app 打开、递归搜索（搜索框按回车）、侧边栏收藏（`favorites.json`）、传输 popover（⌥⌘L）、工具栏进度环、窗口与 tab 恢复（设备连上之前显示"等待…连接"）、退出前和拔线时提醒。
+- 快捷键调整：刷新改为 ⇧⌘R，⌘R 是"显示所在文件夹"（与 Finder 一致）。
+
+**已实机验证（DBI，测试只在 `1: SD Card/Pier-test/` 里写，测完已用 Pier 删掉）**：新建文件夹 + 行内改名；⌘V 上传（100 MB 分段写、小文件、带中文名的文件夹树、0 字节文件）；「下载到…」下回来的 100 MB 文件 SHA-1 与原文件一致（分段写 + 分块读整条链路无损）；失败任务重试（会删掉上次留下的残缺对象再重传）；Quick Look；图标视图；列表里拖到文件夹 = 移动；递归搜索（结果带「位置」列）；收藏；删除确认（默认按钮是「取消」）；任务持久化；正常退出后恢复窗口位置。
+**实测发现并已修复**：
+- 0 字节文件 SendObject 返回 0x2002 之后，DBI 上用这个句柄回读会返回 0x2009，所以 0 字节文件只发 SendObjectInfo，并且不做回读。
+- 工具栏的视图切换按钮被 validate 判成不可用，已修复。
+- 搜索框回车改用 delegate 的 `insertNewline:` 判断，不再看 currentEvent。
+- 窗口恢复：要在 window 上 invalidate（而不是 window controller 上），并注册 `NSQuitAlwaysKeepsWindows`。不这样做的话，系统设置为"退出时关闭窗口"时，正常退出后不会恢复。
+**还没验证**：⌘C 后到 Finder 里 ⌘V（没有拿到 Finder 的控制权限）、拖到 Finder、图片缩略图（测试目录里没有图片）、PTP 事件是否真的会送到。另外，自动化工具拖动图标视图里的项目没有触发拖拽，需要人工试一下。
+**已知限制**：
+- DBI 移动后的目录缓存问题：`MoveLedger` 只存在内存里，重启 Pier 后，DBI 又会在原目录里列出已经移走的文件（文件实际已经移动，这是 DBI 的缓存，AFT 也一样）。
+- Pier 被强行结束后，ptpcamerad 会看不到 DBI，需要重新插拔。现在正常退出时会主动关闭会话。
+- SD 卡根目录里有 spike 留下的 `g-move-to-0.bin`、`tomove.bin`（DBI 重新扫描后才出现），没有动，留给用户决定要不要删。
+- **下一阶段**：补完上面没验证的几项；>4 GB NSP 往 DBI 安装存储的分段写验证（需用户同意）；分栏视图（v1.1）。
 
 ## 环境
 - macOS 27.0.1（Apple 芯片），Xcode 27.0，Swift 6.4

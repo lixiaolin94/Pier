@@ -7,13 +7,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     private(set) var location: BrowserLocation?
     private var backStack: [BrowserLocation] = []
     private var forwardStack: [BrowserLocation] = []
+    /// 窗口恢复时要回到的位置；设备连上之前先记着
+    private var pendingRestore: StoredLocation?
 
     var onClose: (() -> Void)?
 
     private let splitController = BrowserSplitViewController()
     private var searchItem: NSSearchToolbarItem?
+    private var viewModeItem: NSToolbarItemGroup?
+    private var transfersItem: NSToolbarItem?
+    private var transfersPopover: NSPopover?
 
-    init(location: BrowserLocation?) {
+    static let restorationIdentifier = NSUserInterfaceItemIdentifier("work.xiaolin.Pier.browser")
+
+    var content: ContentViewController { splitController.content }
+
+    init(location: BrowserLocation?, restoring stored: StoredLocation? = nil) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 620),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
@@ -22,7 +31,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         window.titlebarSeparatorStyle = .automatic
         window.tabbingMode = .preferred
         window.tabbingIdentifier = "work.xiaolin.Pier.browser"
-        window.isRestorable = false   // 状态恢复留到后续版本
+        window.identifier = Self.restorationIdentifier
+        window.isRestorable = true
+        window.restorationClass = BrowserWindowRestoration.self
         super.init(window: window)
 
         window.delegate = self
@@ -39,9 +50,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         toolbar.autosavesConfiguration = true
         window.toolbar = toolbar
 
-        NotificationCenter.default.addObserver(self, selector: #selector(devicesDidChange(_:)),
-                                               name: DeviceManager.devicesDidChange, object: nil)
-        navigate(to: location ?? defaultLocation(), recordHistory: false)
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(devicesDidChange(_:)), name: DeviceManager.devicesDidChange, object: nil)
+        center.addObserver(self, selector: #selector(transfersDidUpdate(_:)), name: TransferQueue.didChange, object: nil)
+        center.addObserver(self, selector: #selector(transfersDidUpdate(_:)), name: TransferQueue.progressDidUpdate, object: nil)
+
+        pendingRestore = stored
+        if let stored, location == nil {
+            content.setPlaceholder(String(localized: "等待“\(stored.deviceName)”连接…"))
+            navigate(to: nil, recordHistory: false)
+            tryRestore()
+        } else {
+            navigate(to: location ?? defaultLocation(), recordHistory: false)
+        }
+        updateTransfersItem()
     }
 
     @available(*, unavailable)
@@ -50,7 +72,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     // MARK: 导航
 
     func navigate(to newLocation: BrowserLocation?, recordHistory: Bool = true) {
-        guard newLocation != location else { return }
+        if newLocation != nil { pendingRestore = nil }
+        guard newLocation != location || newLocation == nil else { return }
         if recordHistory, let location {
             backStack.append(location)
             forwardStack.removeAll()
@@ -69,17 +92,35 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
         window?.title = location?.title ?? "Pier"
         searchItem?.searchField.stringValue = ""
         splitController.show(location)
+        viewModeDidChange()
         window?.toolbar?.validateVisibleItems()
+        window?.invalidateRestorableState()
     }
 
     /// 没有指定位置时，打开第一台就绪设备的第一个存储
     private func defaultLocation() -> BrowserLocation? {
         for device in DeviceManager.shared.devices {
-            if case .ready = device.state, let s = device.storages.first {
+            if device.isReady, let s = device.storages.first {
                 return BrowserLocation(deviceID: device.id, storageID: s.id)
             }
         }
         return nil
+    }
+
+    private func tryRestore() {
+        guard let stored = pendingRestore, DeviceManager.shared.readyDevice(persistentID: stored.deviceID) != nil else { return }
+        Task { [weak self] in
+            // 文件夹可能已经不在了：退回到存储根目录
+            var resolved = await stored.resolve()
+            if resolved == nil {
+                var root = stored
+                root.path = []
+                resolved = await root.resolve()
+            }
+            guard let self, self.pendingRestore == stored, let resolved else { return }
+            self.content.setPlaceholder(nil)
+            self.navigate(to: resolved, recordHistory: false)
+        }
     }
 
     @objc private func devicesDidChange(_ note: Notification) {
@@ -90,11 +131,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
             self.location = nil
             locationDidChange()
         }
-        if location == nil, let fallback = defaultLocation() {
+        if pendingRestore != nil {
+            tryRestore()
+        } else if location == nil, let fallback = defaultLocation() {
             navigate(to: fallback, recordHistory: false)
         }
         // 存储名等可能变化
         window?.title = location?.title ?? "Pier"
+    }
+
+    func viewModeDidChange() {
+        viewModeItem?.selectedIndex = content.viewMode == .icon ? 0 : 1
     }
 
     // MARK: NSWindowDelegate
@@ -102,6 +149,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self)
         onClose?()
+    }
+
+    func window(_ window: NSWindow, willEncodeRestorableState state: NSCoder) {
+        let stored = location?.stored ?? pendingRestore
+        if let data = try? JSONEncoder().encode(stored) { state.encode(data, forKey: "location") }
     }
 
     // MARK: tab
@@ -112,7 +164,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-// MARK: - 导航动作（响应链）
+/// 窗口恢复：重启后回到上次的位置和 tab（tab 分组由 AppKit 自动恢复）
+final class BrowserWindowRestoration: NSObject, NSWindowRestoration {
+    static func restoreWindow(withIdentifier identifier: NSUserInterfaceItemIdentifier, state: NSCoder,
+                              completionHandler: @escaping (NSWindow?, Error?) -> Void) {
+        let data = state.decodeObject(of: NSData.self, forKey: "location") as Data?
+        let stored = data.flatMap { try? JSONDecoder().decode(StoredLocation?.self, from: $0) } ?? nil
+        MainActor.assumeIsolated {
+            let controller = (NSApp.delegate as? AppDelegate)?.makeBrowser(location: nil, restoring: stored)
+            completionHandler(controller?.window, nil)
+        }
+    }
+}
+
+// MARK: - 导航与文件动作（响应链）
 
 extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolbarItemValidation {
     @objc func goBack(_ sender: Any?) {
@@ -139,8 +204,7 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
     }
 
     @objc func focusSearch(_ sender: Any?) {
-        guard let searchItem else { return }
-        searchItem.beginSearchInteraction()
+        searchItem?.beginSearchInteraction()
     }
 
     @objc func ejectDevice(_ sender: Any?) {
@@ -148,34 +212,62 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
         DeviceManager.shared.eject(device)
     }
 
-    @objc func togglePathBar(_ sender: Any?) { splitController.content.togglePathBar() }
-    @objc func toggleStatusBar(_ sender: Any?) { splitController.content.toggleStatusBar() }
-    @objc func showAsList(_ sender: Any?) {}
-    @objc func showAsIcons(_ sender: Any?) { NSSound.beep() }   // 图标视图尚未实现
+    @objc func reconnectDevice(_ sender: Any?) {
+        guard let device = location?.resolved?.device else { return }
+        DeviceManager.shared.reconnect(device)
+    }
 
-    // 以下由文件列表实现；落到窗口控制器说明没有可用的选择
-    @objc func newFolder(_ sender: Any?) {}
-    @objc func openSelection(_ sender: Any?) {}
-    @objc func openSelectionInNewTab(_ sender: Any?) {}
-    @objc func getInfo(_ sender: Any?) {}
-    @objc func downloadSelection(_ sender: Any?) {}
-    @objc func upload(_ sender: Any?) {}
-    @objc func deleteSelection(_ sender: Any?) {}
+    @objc func togglePathBar(_ sender: Any?) { content.togglePathBar() }
+    @objc func toggleStatusBar(_ sender: Any?) { content.toggleStatusBar() }
+
+    // 焦点在侧边栏时，文件动作也要能用：转给内容区
+    @objc func showAsList(_ sender: Any?) { content.showAsList(sender) }
+    @objc func showAsIcons(_ sender: Any?) { content.showAsIcons(sender) }
+    @objc func newFolder(_ sender: Any?) { content.newFolder(sender) }
+    @objc func openSelection(_ sender: Any?) { content.openSelection(sender) }
+    @objc func openSelectionInNewTab(_ sender: Any?) { content.openSelectionInNewTab(sender) }
+    @objc func getInfo(_ sender: Any?) { content.getInfo(sender) }
+    @objc func downloadSelection(_ sender: Any?) { content.downloadSelection(sender) }
+    @objc func upload(_ sender: Any?) { content.upload(sender) }
+    @objc func deleteSelection(_ sender: Any?) { content.deleteSelection(sender) }
+    @objc func renameSelection(_ sender: Any?) { content.renameSelection(sender) }
+    @objc func quickLook(_ sender: Any?) { content.quickLook(sender) }
+    @objc func showEnclosingFolder(_ sender: Any?) { content.showEnclosingFolder(sender) }
+    @objc func addToSidebar(_ sender: Any?) { content.addToSidebar(sender) }
+
+    @objc func showTransfers(_ sender: Any?) {
+        if let popover = transfersPopover, popover.isShown {
+            popover.performClose(sender)
+            return
+        }
+        guard let window else { return }
+        if !window.isVisible || window.isMiniaturized { window.makeKeyAndOrderFront(nil) }
+        let popover = NSPopover()
+        popover.contentViewController = TransfersViewController()
+        popover.behavior = .transient
+        transfersPopover = popover
+        if #available(macOS 14.0, *), let item = transfersItem, window.toolbar?.items.contains(item) == true, window.toolbar?.isVisible == true {
+            popover.show(relativeTo: item)
+        } else if let contentView = window.contentView {
+            // 工具栏里没有传输按钮时，从窗口右上角弹出
+            let rect = NSRect(x: contentView.bounds.maxX - 60, y: contentView.bounds.maxY - 60, width: 40, height: 1)
+            popover.show(relativeTo: rect, of: contentView, preferredEdge: .minY)
+        }
+    }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(togglePathBar(_:)):
-            item.title = splitController.content.isPathBarVisible ? String(localized: "隐藏路径栏") : String(localized: "显示路径栏")
+            item.title = content.isPathBarVisible ? String(localized: "隐藏路径栏") : String(localized: "显示路径栏")
             return true
         case #selector(toggleStatusBar(_:)):
-            item.title = splitController.content.isStatusBarVisible ? String(localized: "隐藏状态栏") : String(localized: "显示状态栏")
+            item.title = content.isStatusBarVisible ? String(localized: "隐藏状态栏") : String(localized: "显示状态栏")
             return true
-        case #selector(showAsList(_:)):
-            item.state = .on
-            return true
-        case #selector(showAsIcons(_:)):
-            item.state = .off
-            return false
+        case #selector(showAsList(_:)), #selector(showAsIcons(_:)), #selector(newFolder(_:)), #selector(openSelection(_:)),
+             #selector(openSelectionInNewTab(_:)), #selector(getInfo(_:)), #selector(downloadSelection(_:)), #selector(upload(_:)),
+             #selector(deleteSelection(_:)), #selector(renameSelection(_:)), #selector(quickLook(_:)),
+             #selector(showEnclosingFolder(_:)), #selector(addToSidebar(_:)):
+            return content.validateMenuItem(item)
         default:
             return validate(item.action)
         }
@@ -188,9 +280,9 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
         case #selector(goBack(_:)): !backStack.isEmpty
         case #selector(goForward(_:)): !forwardStack.isEmpty
         case #selector(goToEnclosingFolder(_:)): location?.parent != nil
-        case #selector(reload(_:)), #selector(ejectDevice(_:)): location?.resolved != nil
-        case #selector(focusSearch(_:)): true
-        case #selector(newWindowForTab(_:)): true
+        case #selector(reload(_:)), #selector(ejectDevice(_:)), #selector(reconnectDevice(_:)): location?.resolved != nil
+        case #selector(focusSearch(_:)), #selector(newWindowForTab(_:)), #selector(showTransfers(_:)): true
+        case #selector(viewModeChanged(_:)): location?.resolved != nil
         default: false
         }
     }
@@ -231,8 +323,8 @@ extension BrowserWindowController: NSToolbarDelegate {
                                            labels: [String(localized: "图标"), String(localized: "列表")],
                                            target: self, action: #selector(viewModeChanged(_:)))
             group.label = String(localized: "显示")
-            group.selectedIndex = 1
-            group.subitems.first?.isEnabled = false   // 图标视图尚未实现
+            group.selectedIndex = content.viewMode == .icon ? 0 : 1
+            viewModeItem = group
             return group
         case .actions:
             let item = NSMenuToolbarItem(itemIdentifier: id)
@@ -244,14 +336,17 @@ extension BrowserWindowController: NSToolbarDelegate {
         case .transfers:
             let item = button(id, symbol: "arrow.down.circle", label: String(localized: "传输"), action: #selector(showTransfers(_:)))
             item.target = self
+            transfersItem = item
+            updateTransfersItem()
             return item
         case .search:
             let item = NSSearchToolbarItem(itemIdentifier: id)
             item.label = String(localized: "搜索")
-            item.searchField.placeholderString = String(localized: "搜索当前文件夹")
+            item.searchField.placeholderString = String(localized: "搜索（回车搜索子文件夹）")
             item.searchField.target = self
             item.searchField.action = #selector(searchChanged(_:))
             item.searchField.sendsSearchStringImmediately = true
+            item.searchField.delegate = self
             searchItem = item
             return item
         default:
@@ -278,38 +373,47 @@ extension BrowserWindowController: NSToolbarDelegate {
     private func actionsMenu() -> NSMenu {
         let m = NSMenu()
         m.addItem(withTitle: String(localized: "新建文件夹"), action: #selector(BrowserActions.newFolder(_:)), keyEquivalent: "")
-        m.addItem(.separator())
-        m.addItem(withTitle: String(localized: "显示简介"), action: #selector(BrowserActions.getInfo(_:)), keyEquivalent: "")
-        m.addItem(withTitle: String(localized: "下载到…"), action: #selector(BrowserActions.downloadSelection(_:)), keyEquivalent: "")
         m.addItem(withTitle: String(localized: "上传…"), action: #selector(BrowserActions.upload(_:)), keyEquivalent: "")
+        m.addItem(.separator())
+        m.addItem(withTitle: String(localized: "下载到…"), action: #selector(BrowserActions.downloadSelection(_:)), keyEquivalent: "")
+        m.addItem(withTitle: String(localized: "快速查看"), action: #selector(BrowserActions.quickLook(_:)), keyEquivalent: "")
+        m.addItem(withTitle: String(localized: "显示简介"), action: #selector(BrowserActions.getInfo(_:)), keyEquivalent: "")
+        m.addItem(withTitle: String(localized: "重新命名"), action: #selector(BrowserActions.renameSelection(_:)), keyEquivalent: "")
+        m.addItem(.separator())
+        m.addItem(withTitle: String(localized: "删除"), action: #selector(BrowserActions.deleteSelection(_:)), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: String(localized: "刷新"), action: #selector(BrowserActions.reload(_:)), keyEquivalent: "")
         return m
     }
 
     @objc private func viewModeChanged(_ sender: NSToolbarItemGroup) {
-        sender.selectedIndex = 1
+        content.setViewMode(sender.selectedIndex == 0 ? .icon : .list)
     }
 
+    /// 输入过程中只过滤当前文件夹
     @objc private func searchChanged(_ sender: NSSearchField) {
-        splitController.content.fileList.filterText = sender.stringValue
+        content.search(sender.stringValue, recursive: false)
     }
 
-    @objc private func showTransfers(_ sender: Any?) {
-        // 传输队列在下一阶段实现；这里先放一个占位 popover
-        guard let view = window?.toolbar?.items.first(where: { $0.itemIdentifier == .transfers })?.view
-                ?? window?.contentView else { return }
-        let label = NSTextField(labelWithString: String(localized: "没有正在进行的传输"))
-        label.textColor = .secondaryLabelColor
-        let vc = NSViewController()
-        vc.view = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 80))
-        label.translatesAutoresizingMaskIntoConstraints = false
-        vc.view.addSubview(label)
-        NSLayoutConstraint.activate([label.centerXAnchor.constraint(equalTo: vc.view.centerXAnchor),
-                                     label.centerYAnchor.constraint(equalTo: vc.view.centerYAnchor)])
-        let popover = NSPopover()
-        popover.contentViewController = vc
-        popover.behavior = .transient
-        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+    @objc private func transfersDidUpdate(_ note: Notification) { updateTransfersItem() }
+
+    private func updateTransfersItem() {
+        guard let item = transfersItem else { return }
+        let queue = Services.transfers
+        let (fraction, count) = queue.overallProgress
+        let failed = queue.transfers.contains { $0.state.isFailed }
+        let running = queue.transfers.contains { $0.state.isRunning }
+        item.image = TransferToolbarIcon.image(fraction: running ? fraction : nil, failed: failed)
+        item.toolTip = count > 0 ? String(localized: "传输：\(count) 个任务未完成") : String(localized: "传输")
+    }
+}
+
+// MARK: - 搜索框：回车 = 递归搜索整个子树
+
+extension BrowserWindowController: NSSearchFieldDelegate {
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === searchItem?.searchField, selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        content.search(control.stringValue, recursive: true)
+        return true
     }
 }

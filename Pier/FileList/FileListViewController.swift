@@ -1,61 +1,34 @@
 import AppKit
 import PierKit
 
-/// 列表视图中的一个节点。NSOutlineView 靠对象身份追踪展开与选中，所以用类。
+/// Finder 式列表视图：可展开文件夹、可排序的列、行内改名、拖放
 @MainActor
-final class FileNode: NSObject {
-    let object: MTPObject
-    /// 子节点；nil 表示还没读取（仅文件夹）
-    var children: [FileNode]?
-    var loadTask: Task<Void, Never>?
-
-    init(_ object: MTPObject) { self.object = object }
-
-    var name: String { object.name }
-    var isFolder: Bool { object.isFolder }
-}
-
-/// Finder 式列表视图：可展开文件夹、可排序的列、边读边显示
-@MainActor
-final class FileListViewController: NSViewController {
-    weak var browser: BrowserWindowController?
-    var onStatusChange: (() -> Void)?
+final class FileListViewController: NSViewController, FileBrowsingView {
+    weak var host: FileViewHost?
 
     private let outlineView = FileOutlineView()
-    private let spinner = NSProgressIndicator()
-    private let messageLabel = NSTextField(labelWithString: "")
+    /// 正在行内改名的节点
+    private var renaming: FileNode?
 
-    private var location: BrowserLocation?
-    private var session: MTPSession?
-    private var rootNodes: [FileNode] = []
-    private var displayedNodes: [FileNode] = []
-    private var loadTask: Task<Void, Never>?
-    private var spinnerTask: Task<Void, Never>?
-    private(set) var isLoading = false
-
-    var filterText = "" {
-        didSet { if filterText != oldValue { refreshDisplayed() } }
-    }
-
-    var displayedCount: Int { displayedNodes.count }
-    var selectedCount: Int { outlineView.selectedRowIndexes.count }
+    private var contents: FolderContents? { host?.contents }
 
     private enum Column {
         static let name = NSUserInterfaceItemIdentifier("name")
         static let size = NSUserInterfaceItemIdentifier("size")
         static let kind = NSUserInterfaceItemIdentifier("kind")
         static let modified = NSUserInterfaceItemIdentifier("modified")
+        static let location = NSUserInterfaceItemIdentifier("location")
     }
 
     // MARK: 视图
 
     override func loadView() {
-        func column(_ id: NSUserInterfaceItemIdentifier, _ title: String, width: CGFloat, min: CGFloat, sortKey: String) -> NSTableColumn {
+        func column(_ id: NSUserInterfaceItemIdentifier, _ title: String, width: CGFloat, min: CGFloat, sortKey: String?) -> NSTableColumn {
             let c = NSTableColumn(identifier: id)
             c.title = title
             c.width = width
             c.minWidth = min
-            c.sortDescriptorPrototype = NSSortDescriptor(key: sortKey, ascending: true)
+            if let sortKey { c.sortDescriptorPrototype = NSSortDescriptor(key: sortKey, ascending: true) }
             return c
         }
         let nameColumn = column(Column.name, String(localized: "名称"), width: 360, min: 120, sortKey: "name")
@@ -63,9 +36,11 @@ final class FileListViewController: NSViewController {
         let sizeColumn = column(Column.size, String(localized: "大小"), width: 90, min: 60, sortKey: "size")
         sizeColumn.headerCell.alignment = .right
         let kindColumn = column(Column.kind, String(localized: "种类"), width: 140, min: 60, sortKey: "kind")
-        [nameColumn, modifiedColumn, sizeColumn, kindColumn].forEach(outlineView.addTableColumn)
+        let locationColumn = column(Column.location, String(localized: "位置"), width: 200, min: 80, sortKey: nil)
+        [nameColumn, modifiedColumn, sizeColumn, kindColumn, locationColumn].forEach(outlineView.addTableColumn)
         outlineView.outlineTableColumn = nameColumn
         modifiedColumn.isHidden = true   // 设备提供日期时才显示
+        locationColumn.isHidden = true   // 只在搜索结果里显示
 
         outlineView.style = .inset
         outlineView.usesAlternatingRowBackgroundColors = true
@@ -83,44 +58,21 @@ final class FileListViewController: NSViewController {
         outlineView.menu = NSMenu()
         outlineView.menu?.delegate = self
         outlineView.headerView?.menu = headerMenu()
+        outlineView.registerForDraggedTypes([.fileURL, .pierItem])
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
+        outlineView.setDraggingSourceOperationMask([.move, .copy, .link], forLocal: true)
+        outlineView.draggingDestinationFeedbackStyle = .regular
 
         let scroll = NSScrollView()
         scroll.documentView = outlineView
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-
-        spinner.style = .spinning
-        spinner.controlSize = .regular
-        spinner.isDisplayedWhenStopped = false
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-
-        messageLabel.textColor = .secondaryLabelColor
-        messageLabel.alignment = .center
-        messageLabel.isHidden = true
-        messageLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        let root = NSView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(scroll)
-        root.addSubview(spinner)
-        root.addSubview(messageLabel)
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: root.topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            spinner.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            spinner.centerYAnchor.constraint(equalTo: root.centerYAnchor),
-            messageLabel.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            messageLabel.centerYAnchor.constraint(equalTo: root.centerYAnchor),
-            messageLabel.widthAnchor.constraint(lessThanOrEqualTo: root.widthAnchor, constant: -40),
-        ])
-        view = root
+        view = scroll
     }
 
     private func headerMenu() -> NSMenu {
         let menu = NSMenu()
-        for column in outlineView.tableColumns where column.identifier != Column.name {
+        for column in outlineView.tableColumns where column.identifier != Column.name && column.identifier != Column.location {
             let item = menu.addItem(withTitle: column.title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
             item.representedObject = column
             item.target = self
@@ -133,138 +85,45 @@ final class FileListViewController: NSViewController {
         (sender.representedObject as? NSTableColumn)?.isHidden.toggle()
     }
 
-    // MARK: 加载
+    // MARK: FileBrowsingView
 
-    /// 显示某个位置的内容。切换位置会立即取消上一次的读取。
-    func load(_ location: BrowserLocation?) {
-        _ = view
-        loadTask?.cancel()
-        rootNodes.forEach(cancelLoads)
-        self.location = location
-        rootNodes = []
-        refreshDisplayed()
-        setMessage(nil)
-
-        guard let location, let (device, _) = location.resolved, let session = device.session else {
-            self.session = nil
-            setLoading(false)
-            return
-        }
-        self.session = session
-        setLoading(true)
-        loadTask = Task { [weak self] in
-            do {
-                for try await batch in session.listChildren(storage: location.storageID, parent: location.folderHandle) {
-                    guard let self, !Task.isCancelled else { return }
-                    self.rootNodes += batch.map(FileNode.init)
-                    self.refreshDisplayed()
-                }
-                guard let self, !Task.isCancelled else { return }
-                self.setLoading(false)
-                if self.rootNodes.isEmpty { self.setMessage(String(localized: "文件夹为空")) }
-            } catch is CancellationError {
-            } catch {
-                guard let self, !Task.isCancelled else { return }
-                self.setLoading(false)
-                self.setMessage(String(localized: "无法读取此文件夹：\(String(describing: error))"))
+    func contentsDidChange(_ change: FolderContents.Change) {
+        guard isViewLoaded, let contents else { return }
+        switch change {
+        case .reload:
+            let selected = Set(selectedNodes.map(ObjectIdentifier.init))
+            outlineView.tableColumns.first { $0.identifier == Column.modified }?.isHidden = !contents.hasDates
+            outlineView.tableColumns.first { $0.identifier == Column.location }?.isHidden = contents.searchQuery == nil
+            if outlineView.sortDescriptors != contents.sortDescriptors { outlineView.sortDescriptors = contents.sortDescriptors }
+            outlineView.reloadData()
+            restoreExpansion(contents.displayedNodes)
+            var rows = IndexSet()
+            for row in 0..<outlineView.numberOfRows {
+                if let node = outlineView.item(atRow: row) as? FileNode, selected.contains(ObjectIdentifier(node)) { rows.insert(row) }
             }
+            outlineView.selectRowIndexes(rows, byExtendingSelection: false)
+        case let .children(node):
+            outlineView.reloadItem(node, reloadChildren: true)
+        case .status:
+            break
         }
     }
 
-    private func cancelLoads(_ node: FileNode) {
-        node.loadTask?.cancel()
-        node.children?.forEach(cancelLoads)
-    }
-
-    /// 展开文件夹时按需读取子项
-    private func loadChildren(of node: FileNode) {
-        guard node.children == nil, node.loadTask == nil, let session, let location else { return }
-        node.loadTask = Task { [weak self, weak node] in
-            var collected: [MTPObject] = []
-            do {
-                for try await batch in session.listChildren(storage: location.storageID, parent: node?.object.handle ?? 0) {
-                    collected += batch
-                }
-            } catch {
-                collected = []
-            }
-            guard let self, let node, !Task.isCancelled else { return }
-            node.children = self.sorted(collected.map(FileNode.init))
-            node.loadTask = nil
-            self.outlineView.reloadItem(node, reloadChildren: true)
+    /// reloadData 之后恢复之前展开的文件夹
+    private func restoreExpansion(_ nodes: [FileNode]) {
+        for node in nodes where node.isFolder && node.children != nil && expanded.contains(ObjectIdentifier(node)) {
+            outlineView.expandItem(node)
+            restoreExpansion(node.children ?? [])
         }
     }
 
-    private func setLoading(_ loading: Bool) {
-        isLoading = loading
-        spinnerTask?.cancel()
-        if loading {
-            // 延迟显示，避免快速加载时闪烁
-            spinnerTask = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(250))
-                guard let self, !Task.isCancelled, self.isLoading, self.rootNodes.isEmpty else { return }
-                self.spinner.startAnimation(nil)
-            }
-        } else {
-            spinner.stopAnimation(nil)
-        }
-        onStatusChange?()
-    }
+    private var expanded = Set<ObjectIdentifier>()
 
-    private func setMessage(_ text: String?) {
-        messageLabel.stringValue = text ?? ""
-        messageLabel.isHidden = text == nil
-    }
-
-    // MARK: 排序与过滤
-
-    private func refreshDisplayed() {
-        let selected = Set(selectedNodes.map(\.object.handle))
-        var nodes = rootNodes
-        if !filterText.isEmpty {
-            nodes = nodes.filter { $0.name.localizedCaseInsensitiveContains(filterText) }
-        }
-        displayedNodes = sorted(nodes)
-        if !rootNodes.isEmpty { spinner.stopAnimation(nil) }
-        outlineView.tableColumns.first { $0.identifier == Column.modified }?.isHidden =
-            !rootNodes.contains { $0.object.modified != nil }
-        outlineView.reloadData()
-        let rows = IndexSet(displayedNodes.enumerated().filter { selected.contains($0.element.object.handle) }.map(\.offset))
-        outlineView.selectRowIndexes(rows, byExtendingSelection: false)
-        onStatusChange?()
-    }
-
-    private func sorted(_ nodes: [FileNode]) -> [FileNode] {
-        guard let descriptor = outlineView.sortDescriptors.first, let key = descriptor.key else { return nodes }
-        let asc = descriptor.ascending
-        func byName(_ a: FileNode, _ b: FileNode) -> Bool {
-            a.name.localizedStandardCompare(b.name) == (asc ? .orderedAscending : .orderedDescending)
-        }
-        return nodes.sorted { a, b in
-            switch key {
-            case "size":
-                if a.object.size != b.object.size { return asc ? a.object.size < b.object.size : a.object.size > b.object.size }
-            case "kind":
-                let ka = FileTypes.kind(forName: a.name, isFolder: a.isFolder), kb = FileTypes.kind(forName: b.name, isFolder: b.isFolder)
-                if ka != kb { return (ka.localizedStandardCompare(kb) == .orderedAscending) == asc }
-            case "modified":
-                let da = a.object.modified ?? .distantPast, db = b.object.modified ?? .distantPast
-                if da != db { return asc ? da < db : da > db }
-            default:
-                break
-            }
-            return byName(a, b)
-        }
-    }
-
-    // MARK: 选择与打开
-
-    private var selectedNodes: [FileNode] {
+    var selectedNodes: [FileNode] {
         outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) as? FileNode }
     }
 
-    /// 右键点在未选中的行上时，操作对象是被点的那一行（Finder 行为）
-    private var actionNodes: [FileNode] {
+    var actionNodes: [FileNode] {
         let clicked = outlineView.clickedRow
         if clicked >= 0, !outlineView.selectedRowIndexes.contains(clicked), let node = outlineView.item(atRow: clicked) as? FileNode {
             return [node]
@@ -272,78 +131,88 @@ final class FileListViewController: NSViewController {
         return selectedNodes
     }
 
-    private func location(for node: FileNode) -> BrowserLocation? {
-        guard node.isFolder, var base = location else { return nil }
-        // 展开的子文件夹里的节点：从根节点往下拼出完整路径
-        var chain: [FileNode] = [node]
-        var current: Any? = outlineView.parent(forItem: node)
-        while let parent = current as? FileNode {
-            chain.insert(parent, at: 0)
-            current = outlineView.parent(forItem: parent)
-        }
-        for n in chain { base = base.appending(.init(handle: n.object.handle, name: n.name)) }
-        return base
+    func select(_ nodes: [FileNode]) {
+        let rows = IndexSet(nodes.map { outlineView.row(forItem: $0) }.filter { $0 >= 0 })
+        outlineView.selectRowIndexes(rows, byExtendingSelection: false)
+        if let first = rows.first { outlineView.scrollRowToVisible(first) }
     }
+
+    func focus() { view.window?.makeFirstResponder(outlineView) }
+
+    func screenRect(for node: FileNode) -> NSRect? {
+        let row = outlineView.row(forItem: node)
+        guard row >= 0, let window = view.window,
+              let cell = outlineView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
+              let image = cell.imageView else { return nil }
+        return window.convertToScreen(image.convert(image.bounds, to: nil))
+    }
+
+    func beginRename(_ node: FileNode) {
+        let row = outlineView.row(forItem: node)
+        guard row >= 0 else { return }
+        outlineView.selectRowIndexes([row], byExtendingSelection: false)
+        outlineView.scrollRowToVisible(row)
+        guard let cell = outlineView.view(atColumn: outlineView.column(withIdentifier: Column.name), row: row, makeIfNecessary: true) as? NSTableCellView,
+              let field = cell.textField else { return }
+        renaming = node
+        field.isEditable = true
+        field.delegate = self
+        view.window?.makeFirstResponder(field)
+        field.selectBaseName()
+    }
+
+    // MARK: 打开
 
     @objc private func doubleClicked(_ sender: Any?) {
         guard outlineView.clickedRow >= 0, let node = outlineView.item(atRow: outlineView.clickedRow) as? FileNode else { return }
-        open(node, inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
-    }
-
-    private func open(_ node: FileNode, inNewTab: Bool) {
-        guard let target = location(for: node) else {
-            NSSound.beep()   // 打开文件（下载到缓存后用默认 app 打开）在下一阶段实现
-            return
-        }
-        if inNewTab { browser?.openInNewTab(target) } else { browser?.navigate(to: target) }
+        host?.open(node, inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
     }
 }
 
-// MARK: - 动作（响应链）
+// MARK: - 行内改名
 
-extension FileListViewController: BrowserActions, NSMenuItemValidation {
-    @objc func openSelection(_ sender: Any?) {
-        guard let node = actionNodes.first else { return }
-        open(node, inNewTab: false)
-    }
-
-    @objc func openSelectionInNewTab(_ sender: Any?) {
-        actionNodes.filter(\.isFolder).forEach { open($0, inNewTab: true) }
-    }
-
-    // 以下在后续阶段实现
-    @objc func newFolder(_ sender: Any?) {}
-    @objc func getInfo(_ sender: Any?) {}
-    @objc func downloadSelection(_ sender: Any?) {}
-    @objc func upload(_ sender: Any?) {}
-    @objc func deleteSelection(_ sender: Any?) {}
-    @objc func copy(_ sender: Any?) {}
-    @objc func paste(_ sender: Any?) {}
-
-    // 导航类动作交给窗口控制器
-    @objc func goBack(_ sender: Any?) { browser?.goBack(sender) }
-    @objc func goForward(_ sender: Any?) { browser?.goForward(sender) }
-    @objc func goToEnclosingFolder(_ sender: Any?) { browser?.goToEnclosingFolder(sender) }
-    @objc func reload(_ sender: Any?) { browser?.reload(sender) }
-    @objc func ejectDevice(_ sender: Any?) { browser?.ejectDevice(sender) }
-    @objc func focusSearch(_ sender: Any?) { browser?.focusSearch(sender) }
-    @objc func showAsIcons(_ sender: Any?) { browser?.showAsIcons(sender) }
-    @objc func showAsList(_ sender: Any?) { browser?.showAsList(sender) }
-    @objc func togglePathBar(_ sender: Any?) { browser?.togglePathBar(sender) }
-    @objc func toggleStatusBar(_ sender: Any?) { browser?.toggleStatusBar(sender) }
-
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        switch item.action {
-        case #selector(openSelection(_:)):
-            return actionNodes.count == 1 && actionNodes[0].isFolder
-        case #selector(openSelectionInNewTab(_:)):
-            return actionNodes.contains(where: \.isFolder)
-        case #selector(newFolder(_:)), #selector(getInfo(_:)), #selector(downloadSelection(_:)), #selector(upload(_:)),
-             #selector(deleteSelection(_:)), #selector(copy(_:)), #selector(paste(_:)):
-            return false
-        default:
-            return browser?.validateMenuItem(item) ?? false
+extension FileListViewController: NSTextFieldDelegate {
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, let node = renaming else { return }
+        renaming = nil
+        field.isEditable = false
+        let movement = (obj.userInfo?["NSTextMovement"] as? Int).flatMap(NSTextMovement.init(rawValue:))
+        let newName = field.stringValue
+        field.stringValue = node.name
+        if movement != .cancel, newName != node.name {
+            host?.commitRename(node, to: newName)
         }
+        focus()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        // 不合法的名字直接在编辑框里提示，不结束编辑
+        guard selector == #selector(NSResponder.insertNewline(_:)), let node = renaming,
+              let problem = host?.renameProblem(node, to: textView.string), textView.string != node.name else { return false }
+        NSSound.beep()
+        control.toolTip = problem
+        showRenameHint(problem, below: control)
+        return true
+    }
+
+    private func showRenameHint(_ text: String, below control: NSControl) {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.preferredMaxLayoutWidth = 260
+        let vc = NSViewController()
+        let container = NSView()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+        ])
+        vc.view = container
+        let popover = NSPopover()
+        popover.contentViewController = vc
+        popover.behavior = .transient
+        popover.show(relativeTo: control.bounds, of: control, preferredEdge: .maxY)
     }
 }
 
@@ -356,20 +225,7 @@ extension FileListViewController: NSMenuDelegate {
             for item in menu.items { item.state = ((item.representedObject as? NSTableColumn)?.isHidden == false) ? .on : .off }
             return
         }
-        menu.removeAllItems()
-        guard !actionNodes.isEmpty else {
-            menu.addItem(withTitle: String(localized: "新建文件夹"), action: #selector(newFolder(_:)), keyEquivalent: "")
-            menu.addItem(withTitle: String(localized: "刷新"), action: #selector(reload(_:)), keyEquivalent: "")
-            return
-        }
-        menu.addItem(withTitle: String(localized: "打开"), action: #selector(openSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: String(localized: "在新标签页中打开"), action: #selector(openSelectionInNewTab(_:)), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: String(localized: "下载到…"), action: #selector(downloadSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: String(localized: "显示简介"), action: #selector(getInfo(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: String(localized: "拷贝"), action: #selector(copy(_:)), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: String(localized: "删除"), action: #selector(deleteSelection(_:)), keyEquivalent: "")
+        host?.populateContextMenu(menu, for: actionNodes)
     }
 }
 
@@ -377,32 +233,44 @@ extension FileListViewController: NSMenuDelegate {
 
 extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let node = item as? FileNode else { return displayedNodes.count }
-        if node.children == nil { loadChildren(of: node) }
+        guard let node = item as? FileNode else { return contents?.displayedNodes.count ?? 0 }
+        if node.children == nil { contents?.loadChildren(of: node) }
         return node.children?.count ?? 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        guard let node = item as? FileNode else { return displayedNodes[index] }
+        guard let node = item as? FileNode else { return contents!.displayedNodes[index] }
         return node.children![index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        (item as? FileNode)?.isFolder ?? false
+        guard let node = item as? FileNode else { return false }
+        return node.isFolder && contents?.searchQuery == nil
+    }
+
+    func outlineViewItemDidExpand(_ notification: Notification) {
+        if let node = notification.userInfo?["NSObject"] as? FileNode { expanded.insert(ObjectIdentifier(node)) }
+    }
+
+    func outlineViewItemDidCollapse(_ notification: Notification) {
+        if let node = notification.userInfo?["NSObject"] as? FileNode { expanded.remove(ObjectIdentifier(node)) }
     }
 
     func outlineView(_ outlineView: NSOutlineView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        refreshDisplayed()
+        contents?.sortDescriptors = outlineView.sortDescriptors
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        onStatusChange?()
+        host?.selectionDidChange()
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? FileNode, let column = tableColumn else { return nil }
         let cell = makeCell(column.identifier, withImage: column.identifier == Column.name)
         let field = cell.textField!
+        field.isEditable = false
+        field.textColor = column.identifier == Column.name ? .labelColor : .secondaryLabelColor
+        field.alignment = .natural
         switch column.identifier {
         case Column.name:
             field.stringValue = node.name
@@ -414,10 +282,11 @@ extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate
             field.stringValue = FileTypes.kind(forName: node.name, isFolder: node.isFolder)
         case Column.modified:
             field.stringValue = Format.date(node.object.modified)
+        case Column.location:
+            field.stringValue = node.folderPath.map(\.name).joined(separator: " ▸ ")
         default:
             break
         }
-        if column.identifier != Column.name { field.textColor = .secondaryLabelColor }
         return cell
     }
 
@@ -427,6 +296,7 @@ extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate
         cell.identifier = id
         let text = NSTextField(labelWithString: "")
         text.lineBreakMode = .byTruncatingMiddle
+        text.cell?.truncatesLastVisibleLine = true
         text.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(text)
         cell.textField = text
@@ -452,16 +322,33 @@ extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate
         NSLayoutConstraint.activate(constraints)
         return cell
     }
+
+    // MARK: 拖放
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let node = item as? FileNode, renaming == nil else { return nil }
+        return host?.pasteboardWriter(for: node)
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+        // 放到文件上 = 放到它所在的文件夹；放在行与行之间 = 放到那一层的文件夹
+        var target = item as? FileNode
+        if let node = target, !node.isFolder { target = node.parent }
+        if contents?.searchQuery != nil && target == nil { return [] }
+        outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        return host?.validateDrop(info, onto: target) ?? []
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        host?.acceptDrop(info, onto: item as? FileNode) ?? false
+    }
 }
 
-/// 处理 Finder 式键盘操作：⌘↓ 打开、回车（以后用于改名）
+/// 处理 Finder 式键盘操作：⌘↓ 打开、空格 Quick Look、回车改名
 @MainActor
 final class FileOutlineView: NSOutlineView {
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command), event.specialKey == .downArrow {
-            NSApp.sendAction(#selector(BrowserActions.openSelection(_:)), to: nil, from: self)
-            return
-        }
+        if FileViewKeys.handle(event, from: self) { return }
         super.keyDown(with: event)
     }
 }

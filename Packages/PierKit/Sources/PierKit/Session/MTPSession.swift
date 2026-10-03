@@ -8,12 +8,16 @@ import Foundation
 /// - 长任务（大文件分块）每块单独申请通道，块与块之间高优先级请求自然会插队。
 public final class MTPSession: Sendable {
     public let deviceInfo: PTPDeviceInfo
+    public let quirks: DeviceQuirks
+    public let tuning: TransferTuning
     private let transport: any PTPTransport
     private let scheduler = ChannelScheduler()
 
-    public init(transport: any PTPTransport, deviceInfo: PTPDeviceInfo) {
+    public init(transport: any PTPTransport, deviceInfo: PTPDeviceInfo, tuning: TransferTuning = .default) {
         self.transport = transport
         self.deviceInfo = deviceInfo
+        self.quirks = DeviceQuirks(deviceInfo: deviceInfo)
+        self.tuning = tuning
     }
 
     /// 单条 outData 的上限

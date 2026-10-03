@@ -62,11 +62,16 @@ enum MainMenu {
         m.addItem(item(String(localized: "关闭窗口"), #selector(NSWindow.performClose(_:)), "w"))
         m.addItem(.separator())
         m.addItem(item(String(localized: "显示简介"), #selector(BrowserActions.getInfo(_:)), "i"))
+        m.addItem(item(String(localized: "重新命名"), #selector(BrowserActions.renameSelection(_:))))
+        m.addItem(item(String(localized: "快速查看"), #selector(BrowserActions.quickLook(_:)), "y"))
+        m.addItem(item(String(localized: "显示所在文件夹"), #selector(BrowserActions.showEnclosingFolder(_:)), "r"))
+        m.addItem(item(String(localized: "添加到边栏"), #selector(BrowserActions.addToSidebar(_:)), "t", [.command, .control]))
         m.addItem(item(String(localized: "下载到…"), #selector(BrowserActions.downloadSelection(_:)), "d", [.command, .shift]))
         m.addItem(item(String(localized: "上传…"), #selector(BrowserActions.upload(_:)), "u", [.command, .shift]))
         m.addItem(.separator())
         m.addItem(item(String(localized: "删除"), #selector(BrowserActions.deleteSelection(_:)), "\u{8}"))
         m.addItem(.separator())
+        m.addItem(item(String(localized: "重新连接设备"), #selector(BrowserActions.reconnectDevice(_:))))
         m.addItem(item(String(localized: "推出"), #selector(BrowserActions.ejectDevice(_:)), "e"))
         return m
     }
@@ -110,7 +115,7 @@ enum MainMenu {
         m.addItem(item(String(localized: "前进"), #selector(BrowserActions.goForward(_:)), "]"))
         m.addItem(item(String(localized: "上层文件夹"), #selector(BrowserActions.goToEnclosingFolder(_:)), String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))))
         m.addItem(.separator())
-        m.addItem(item(String(localized: "刷新"), #selector(BrowserActions.reload(_:)), "r"))
+        m.addItem(item(String(localized: "刷新"), #selector(BrowserActions.reload(_:)), "r", [.command, .shift]))
         return m
     }
 
@@ -124,28 +129,35 @@ enum MainMenu {
         m.addItem(item(String(localized: "将标签页移到新窗口"), #selector(NSWindow.moveTabToNewWindow(_:))))
         m.addItem(item(String(localized: "合并所有窗口"), #selector(NSWindow.mergeAllWindows(_:))))
         m.addItem(.separator())
+        m.addItem(item(String(localized: "传输"), #selector(AppDelegate.showTransfers(_:)), "l", [.command, .option]))
+        m.addItem(.separator())
         m.addItem(item(String(localized: "前置全部窗口"), #selector(NSApplication.arrangeInFront(_:))))
         return m
     }
 }
 
-/// 沿响应链分发的浏览器动作。用 @objc 协议声明 selector，让菜单与实现解耦。
+/// 沿响应链分发的浏览器动作。用 @objc 协议声明 selector，让菜单与实现解耦；各响应者只实现自己处理的那部分。
 @MainActor @objc protocol BrowserActions {
-    func newFolder(_ sender: Any?)
-    func openSelection(_ sender: Any?)
-    func openSelectionInNewTab(_ sender: Any?)
-    func getInfo(_ sender: Any?)
-    func downloadSelection(_ sender: Any?)
-    func upload(_ sender: Any?)
-    func deleteSelection(_ sender: Any?)
-    func ejectDevice(_ sender: Any?)
-    func focusSearch(_ sender: Any?)
-    func showAsIcons(_ sender: Any?)
-    func showAsList(_ sender: Any?)
-    func togglePathBar(_ sender: Any?)
-    func toggleStatusBar(_ sender: Any?)
-    func goBack(_ sender: Any?)
-    func goForward(_ sender: Any?)
-    func goToEnclosingFolder(_ sender: Any?)
-    func reload(_ sender: Any?)
+    @objc optional func newFolder(_ sender: Any?)
+    @objc optional func openSelection(_ sender: Any?)
+    @objc optional func openSelectionInNewTab(_ sender: Any?)
+    @objc optional func getInfo(_ sender: Any?)
+    @objc optional func downloadSelection(_ sender: Any?)
+    @objc optional func upload(_ sender: Any?)
+    @objc optional func deleteSelection(_ sender: Any?)
+    @objc optional func ejectDevice(_ sender: Any?)
+    @objc optional func focusSearch(_ sender: Any?)
+    @objc optional func showAsIcons(_ sender: Any?)
+    @objc optional func showAsList(_ sender: Any?)
+    @objc optional func togglePathBar(_ sender: Any?)
+    @objc optional func toggleStatusBar(_ sender: Any?)
+    @objc optional func goBack(_ sender: Any?)
+    @objc optional func goForward(_ sender: Any?)
+    @objc optional func goToEnclosingFolder(_ sender: Any?)
+    @objc optional func reload(_ sender: Any?)
+    @objc optional func renameSelection(_ sender: Any?)
+    @objc optional func quickLook(_ sender: Any?)
+    @objc optional func showEnclosingFolder(_ sender: Any?)
+    @objc optional func addToSidebar(_ sender: Any?)
+    @objc optional func reconnectDevice(_ sender: Any?)
 }

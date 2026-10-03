@@ -90,3 +90,47 @@ public enum PTPHandle {
     /// GetObjectHandles 的 format 参数：所有格式
     public static let allFormats: UInt32 = 0
 }
+
+/// PTP / MTP 事件码
+public struct PTPEventCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt16
+    public init(rawValue: UInt16) { self.rawValue = rawValue }
+
+    public static let objectAdded = Self(rawValue: 0x4002)
+    public static let objectRemoved = Self(rawValue: 0x4003)
+    public static let storeAdded = Self(rawValue: 0x4004)
+    public static let storeRemoved = Self(rawValue: 0x4005)
+    public static let devicePropChanged = Self(rawValue: 0x4006)
+    public static let objectInfoChanged = Self(rawValue: 0x4007)
+    public static let deviceInfoChanged = Self(rawValue: 0x4008)
+    public static let storeFull = Self(rawValue: 0x400A)
+    public static let storageInfoChanged = Self(rawValue: 0x400C)
+    public static let objectPropChanged = Self(rawValue: 0xC801)
+
+    public var description: String { String(format: "0x%04X", rawValue) }
+}
+
+/// 设备发来的一个事件（PTP USB 事件 container：len u32, type=4 u16, code u16, txid u32, params…）
+public struct PTPEvent: Sendable, CustomStringConvertible {
+    public var code: PTPEventCode
+    public var parameters: [UInt32]
+
+    public init(code: PTPEventCode, parameters: [UInt32] = []) {
+        self.code = code
+        self.parameters = parameters
+    }
+
+    public init(container: Data) throws {
+        var r = PTPDataReader(container)
+        let length = Int(try r.u32())
+        let type = try r.u16()
+        guard type == 4 else { throw PTPError.malformedData("事件 container 类型 \(type)") }
+        code = PTPEventCode(rawValue: try r.u16())
+        _ = try r.u32()
+        var params: [UInt32] = []
+        while r.offset + 4 <= min(length, container.count), params.count < 3 { params.append(try r.u32()) }
+        parameters = params
+    }
+
+    public var description: String { "\(code)(\(parameters.map { String(format: "0x%08X", $0) }.joined(separator: ", ")))" }
+}

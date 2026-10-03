@@ -14,9 +14,12 @@ final class ImageCaptureTransport: PTPTransport, @unchecked Sendable {
     private let transactionID = OSAllocatedUnfairLock(initialState: UInt32(1))
 
     let maxOutDataLength = 4_294_967_283
+    /// 有指令超时时回调（交给 DeviceManager 判断要不要重连）
+    private let onTimeout: @Sendable () -> Void
 
-    init(device: ICCameraDevice) {
+    init(device: ICCameraDevice, onTimeout: @escaping @Sendable () -> Void = {}) {
         self.device = device
+        self.onTimeout = onTimeout
     }
 
     func execute(_ command: PTPCommand, outData: Data?) async throws -> PTPResponse {
@@ -27,6 +30,7 @@ final class ImageCaptureTransport: PTPTransport, @unchecked Sendable {
         let container = command.container(transactionID: txid)
         let timeout = Self.timeout(for: command, outBytes: outData?.count ?? 0)
         let device = self.device
+        let onTimeout = self.onTimeout
 
         return try await withCheckedThrowingContinuation { continuation in
             let once = ResumeOnce(continuation)
@@ -44,7 +48,7 @@ final class ImageCaptureTransport: PTPTransport, @unchecked Sendable {
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                once.resume(throwing: PTPError.timeout(command.operation))
+                if once.resume(throwing: PTPError.timeout(command.operation)) { onTimeout() }
             }
         }
     }
@@ -69,7 +73,14 @@ private final class ResumeOnce<T: Sendable>: Sendable {
     init(_ c: CheckedContinuation<T, Error>) { state = OSAllocatedUnfairLock(initialState: c) }
 
     func resume(returning value: T) { take()?.resume(returning: value) }
-    func resume(throwing error: Error) { take()?.resume(throwing: error) }
+
+    /// 返回这次是否真的 resume 了（false 表示已经被另一方抢先）
+    @discardableResult
+    func resume(throwing error: Error) -> Bool {
+        guard let c = take() else { return false }
+        c.resume(throwing: error)
+        return true
+    }
 
     private func take() -> CheckedContinuation<T, Error>? {
         state.withLock { c in

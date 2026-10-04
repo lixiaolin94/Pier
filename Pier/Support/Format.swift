@@ -60,18 +60,17 @@ enum FileTypes {
     }
 }
 
-/// 设备、存储的符号图标（侧边栏和路径栏共用，保证一致）
+/// 设备、存储的符号图标（侧边栏和路径栏共用）。
+///
+/// 和磁盘工具一样只表达层级、不猜设备种类：MTP/PTP 设备可能是手机、平板、相机、游戏机……
+/// 按厂商或存储名字猜图标迟早会猜错，具体是什么交给名字说明。
 @MainActor
 enum DeviceSymbols {
-    static func name(for device: MTPDevice) -> String {
-        let manufacturer = device.deviceInfo?.manufacturer ?? ""
-        if manufacturer.localizedCaseInsensitiveContains("Nintendo") { return "gamecontroller" }
-        return "candybarphone"
-    }
+    /// 一台连接着的设备
+    static func name(for device: MTPDevice) -> String { "externaldrive.connected.to.line.below" }
 
-    static func name(for storage: MTPStorage) -> String {
-        storage.displayName.localizedCaseInsensitiveContains("SD") ? "sdcard" : "internaldrive"
-    }
+    /// 设备上的一个存储（卷）
+    static func name(for storage: MTPStorage) -> String { "internaldrive" }
 
     /// 固定 16×16 的方形图标，符号按原比例居中。
     /// NSPathControl 会把每项的图片缩放成正方形，直接给符号图片时竖长的符号（手机、存储卡）会被拉宽。

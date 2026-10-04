@@ -77,7 +77,7 @@
 2. **DBI 的 MTP 在 macOS 看来是一台 PTP 相机**，系统的 `ptpcamerad`（`/System/Library/LaunchAgents/com.apple.ptpcamerad.plist`，按需启动的 MachService）会独占这个 USB 接口。
 3. **`ptpcamerad` 受 SIP 保护**：`launchctl disable gui/501/com.apple.ptpcamerad` 和 `bootout` 都**无效**，被 kill 后会立刻被 launchd 重新拉起。实测会请求它的程序有：`icdd`（开机自启）、Google Drive（有"备份 USB 设备照片"的功能）、照片 App 等。
 4. **USB 接口是先占先得**：AFT 一旦拿到独占权，`ptpcamerad` 再怎么重启也抢不走。实测 AFT 一退出，`ptpcamerad` 马上就把 DBI 占走了。
-5. 现行的临时方案：`~/bin/aft-mtp`，由 `/Applications/Switch MTP AFT.app`（AppleScript 小程序）在后台调用。做法是"杀掉 ptpcamerad → 打开 AFT → 确认 AFT 拿到独占权，没拿到就重试；AFT 运行期间只在 ptpcamerad 抢走接口时才出手"。副本见 `aft-mtp.reference.sh`。AFT Agent 已经通过把文件改名为 `.disabled` 来禁用。
+5. ~~旧的临时方案~~（已于 2026-10-04 清理）：`~/bin/aft-mtp` + `/Applications/Switch MTP AFT.app`，靠反复杀掉 ptpcamerad 让 AFT 拿到独占权，并把 AFT Agent 改名禁用。Pier 走 ImageCaptureCore 与 ptpcamerad 协作，不再需要这些；脚本原文见 git 历史（`aft-mtp.reference.sh`）。
 
 ## 两条技术路线
 **方案 A（优先验证）：ImageCaptureCore，跟 ptpcamerad 合作，不跟它抢**
@@ -98,7 +98,7 @@
 3. **吞吐量**：用 `GetPartialObject` 分块读取一个大文件（≥1 GB），测 MB/s；如果写入可行，也测一下写入速度。跟 AFT 的体感速度对比。
 
 ## 注意事项
-- 测试前**先退出 AFT**（`osascript -e 'quit app "Android File Transfer"'`），把设备让给 ptpcamerad。方案 A 本来就要求 ptpcamerad 拿着设备。
+- **不要同时运行 AFT**：AFT 会独占 USB 接口，Pier（以及 ImageCaptureCore）就看不到设备了。方案 A 要求 ptpcamerad 拿着设备。
 - ImageCaptureCore 在 macOS 上可能需要 entitlement 或权限弹窗（相机 / USB / 照片）。命令行工具如果因为 TCC 拿不到设备，就改成一个最小的 SwiftUI 或 AppKit app target。
 - spike 代码保持简单，放在 `spike/` 目录下，Swift Package 或单文件都可以。
 - 用户偏好：简体中文交流；代码标识符保持英文。

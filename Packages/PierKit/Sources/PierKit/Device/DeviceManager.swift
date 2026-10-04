@@ -205,25 +205,37 @@ public final class DeviceManager: NSObject {
 }
 
 // MARK: - ICDeviceBrowserDelegate / ICCameraDeviceDelegate
-// ImageCaptureCore 在主线程回调
+// 大多数回调在主线程，但设备主动发来的 PTP 事件走 ICDeviceOperationQueue
+// （如 DBI 安装 NSP 完成时），所以统一经 onMain 切回主线程，不能 assumeIsolated。
+
+private struct UncheckedBox<T>: @unchecked Sendable { let value: T }
+
+nonisolated private func onMain(_ body: @escaping @MainActor () -> Void) {
+    if Thread.isMainThread {
+        MainActor.assumeIsolated(body)
+    } else {
+        let box = UncheckedBox(value: body)
+        DispatchQueue.main.async { MainActor.assumeIsolated(box.value) }
+    }
+}
 
 extension DeviceManager: ICDeviceBrowserDelegate {
     nonisolated public func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
-        MainActor.assumeIsolated {
-            if let camera = device as? ICCameraDevice { connect(camera) }
+        onMain {
+            if let camera = device as? ICCameraDevice { self.connect(camera) }
         }
     }
 
     nonisolated public func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
-        MainActor.assumeIsolated {
-            if let d = self.device(for: device) { remove(d) }
+        onMain {
+            if let d = self.device(for: device) { self.remove(d) }
         }
     }
 }
 
 extension DeviceManager: ICCameraDeviceDelegate {
     nonisolated public func device(_ device: ICDevice, didOpenSessionWithError error: (any Error)?) {
-        MainActor.assumeIsolated {
+        onMain {
             guard let d = self.device(for: device), let c = d.openContinuation else { return }
             d.openContinuation = nil
             if let error { c.resume(throwing: PTPError.transport(error.localizedDescription)) } else { c.resume() }
@@ -231,8 +243,8 @@ extension DeviceManager: ICCameraDeviceDelegate {
     }
 
     nonisolated public func didRemove(_ device: ICDevice) {
-        MainActor.assumeIsolated {
-            if let d = self.device(for: device) { remove(d) }
+        onMain {
+            if let d = self.device(for: device) { self.remove(d) }
         }
     }
 
@@ -249,8 +261,8 @@ extension DeviceManager: ICCameraDeviceDelegate {
     nonisolated public func cameraDeviceDidChangeCapability(_ camera: ICCameraDevice) {}
     nonisolated public func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {
         guard let event = try? PTPEvent(container: eventData) else { return }
-        MainActor.assumeIsolated {
-            if let d = self.device(for: camera), d.isReady { handle(event, from: d) }
+        onMain {
+            if let d = self.device(for: camera), d.isReady { self.handle(event, from: d) }
         }
     }
     nonisolated public func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {}

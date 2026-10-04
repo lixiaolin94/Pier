@@ -2,7 +2,7 @@ import AppKit
 import PierKit
 import Quartz
 
-/// 画廊视图（Finder 式）：上面是选中项目的大预览，下面一排缩略图。
+/// 画廊视图（Finder 式）：上面是选中项目的大预览，下面一排缩略图。和 Finder 一样不分组。
 ///
 /// MTP 不能只读文件的一部分来预览，所以预览要先把文件下载到本机缓存（和 Quick Look 共用 LocalCopies）。
 /// 太大的文件不自动下载，只显示大图标，按空格键仍可用 Quick Look 预览。
@@ -47,9 +47,9 @@ final class GalleryViewController: NSViewController, FileBrowsingView {
         strip.setDraggingSourceOperationMask([.move, .copy, .link], forLocal: true)
         strip.menu = NSMenu()
         strip.menu?.delegate = self
-        strip.onDoubleClick = { [weak self] index in
-            guard let self, index < self.nodes.count else { return }
-            self.host?.open(self.nodes[index], inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
+        strip.onDoubleClick = { [weak self] path in
+            guard let self, path.item < self.nodes.count else { return }
+            self.host?.open(self.nodes[path.item], inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
         }
         let stripScroll = NSScrollView()
         stripScroll.documentView = strip
@@ -199,7 +199,7 @@ final class GalleryViewController: NSViewController, FileBrowsingView {
     }
 
     var actionNodes: [FileNode] {
-        if let clicked = strip.clickedIndex, clicked < nodes.count,
+        if let clicked = strip.clickedIndexPath?.item, clicked < nodes.count,
            !strip.selectionIndexPaths.contains(IndexPath(item: clicked, section: 0)) {
             return [nodes[clicked]]
         }

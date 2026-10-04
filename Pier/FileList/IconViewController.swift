@@ -1,18 +1,30 @@
 import AppKit
 import PierKit
 
-/// 图标视图：大图标网格，图片在后台低优先级生成缩略图
+/// 图标视图：大图标网格，图片在后台低优先级生成缩略图；分组时每组一个带标题的分区
 @MainActor
 final class IconViewController: NSViewController, FileBrowsingView {
     weak var host: FileViewHost?
 
     private let collectionView = IconCollectionView()
+    private let layout = NSCollectionViewFlowLayout()
     private let thumbnails = ThumbnailRequests()
     private var contents: FolderContents? { host?.contents }
-    private var nodes: [FileNode] { contents?.displayedNodes ?? [] }
+    private var groups: [FileGroup] { contents?.groups ?? [] }
+
+    private func node(at path: IndexPath) -> FileNode? {
+        guard groups.indices.contains(path.section), groups[path.section].nodes.indices.contains(path.item) else { return nil }
+        return groups[path.section].nodes[path.item]
+    }
+
+    private func indexPath(of node: FileNode) -> IndexPath? {
+        for (section, group) in groups.enumerated() {
+            if let item = group.nodes.firstIndex(where: { $0 === node }) { return IndexPath(item: item, section: section) }
+        }
+        return nil
+    }
 
     override func loadView() {
-        let layout = NSCollectionViewFlowLayout()
         layout.itemSize = NSSize(width: 104, height: 104)
         layout.minimumInteritemSpacing = 8
         layout.minimumLineSpacing = 8
@@ -25,14 +37,16 @@ final class IconViewController: NSViewController, FileBrowsingView {
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(IconItem.self, forItemWithIdentifier: IconItem.identifier)
+        collectionView.register(SectionHeaderView.self, forSupplementaryViewOfKind: NSCollectionView.elementKindSectionHeader,
+                                withIdentifier: SectionHeaderView.identifier)
         collectionView.registerForDraggedTypes([.fileURL, .pierItem])
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)
         collectionView.setDraggingSourceOperationMask([.move, .copy, .link], forLocal: true)
         collectionView.menu = NSMenu()
         collectionView.menu?.delegate = self
-        collectionView.onDoubleClick = { [weak self] index in
-            guard let self, index < self.nodes.count else { return }
-            self.host?.open(self.nodes[index], inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
+        collectionView.onDoubleClick = { [weak self] path in
+            guard let self, let node = self.node(at: path) else { return }
+            self.host?.open(node, inNewTab: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
         }
 
         let scroll = NSScrollView()
@@ -46,29 +60,30 @@ final class IconViewController: NSViewController, FileBrowsingView {
 
     func contentsDidChange(_ change: FolderContents.Change) {
         guard isViewLoaded, case .reload = change else { return }
-        let selected = Set(selectedNodes.map(ObjectIdentifier.init))
+        let selected = selectedNodes
         // 换了文件夹：之前排队的缩略图不要了
-        thumbnails.keep(only: nodes)
+        thumbnails.keep(only: contents?.displayedNodes ?? [])
+        let grouped = contents?.isGrouped ?? false
+        layout.headerReferenceSize = NSSize(width: 0, height: grouped ? 30 : 0)
+        layout.sectionInset = NSEdgeInsets(top: grouped ? 4 : 12, left: 12, bottom: grouped ? 16 : 12, right: 12)
         collectionView.reloadData()
-        let paths = nodes.enumerated().filter { selected.contains(ObjectIdentifier($0.element)) }.map { IndexPath(item: $0.offset, section: 0) }
-        collectionView.selectionIndexPaths = Set(paths)
+        collectionView.selectionIndexPaths = Set(selected.compactMap(indexPath(of:)))
     }
 
     var selectedNodes: [FileNode] {
-        collectionView.selectionIndexPaths.sorted().compactMap { $0.item < nodes.count ? nodes[$0.item] : nil }
+        collectionView.selectionIndexPaths.sorted().compactMap(node(at:))
     }
 
     var actionNodes: [FileNode] {
-        if let clicked = collectionView.clickedIndex, clicked < nodes.count,
-           !collectionView.selectionIndexPaths.contains(IndexPath(item: clicked, section: 0)) {
-            return [nodes[clicked]]
+        if let clicked = collectionView.clickedIndexPath, let node = node(at: clicked),
+           !collectionView.selectionIndexPaths.contains(clicked) {
+            return [node]
         }
         return selectedNodes
     }
 
     func select(_ selection: [FileNode]) {
-        let ids = Set(selection.map(ObjectIdentifier.init))
-        let paths = Set(nodes.enumerated().filter { ids.contains(ObjectIdentifier($0.element)) }.map { IndexPath(item: $0.offset, section: 0) })
+        let paths = Set(selection.compactMap(indexPath(of:)))
         collectionView.selectionIndexPaths = paths
         if !paths.isEmpty { collectionView.scrollToItems(at: paths, scrollPosition: .nearestHorizontalEdge) }
         host?.selectionDidChange()
@@ -77,9 +92,8 @@ final class IconViewController: NSViewController, FileBrowsingView {
     func focus() { view.window?.makeFirstResponder(collectionView) }
 
     func screenRect(for node: FileNode) -> NSRect? {
-        guard let index = nodes.firstIndex(of: node), let window = view.window,
-              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? IconItem,
-              let image = item.imageView else { return nil }
+        guard let path = indexPath(of: node), let window = view.window,
+              let item = collectionView.item(at: path) as? IconItem, let image = item.imageView else { return nil }
         return window.convertToScreen(image.convert(image.bounds, to: nil))
     }
 
@@ -91,8 +105,7 @@ final class IconViewController: NSViewController, FileBrowsingView {
 
     private func requestThumbnail(for node: FileNode) {
         thumbnails.request(node, device: contents?.device, size: 128) { [weak self] node in
-            guard let self, let index = self.nodes.firstIndex(of: node),
-                  let item = self.collectionView.item(at: IndexPath(item: index, section: 0)) as? IconItem else { return }
+            guard let self, let path = self.indexPath(of: node), let item = self.collectionView.item(at: path) as? IconItem else { return }
             item.imageView?.image = node.displayIcon
         }
     }
@@ -101,17 +114,29 @@ final class IconViewController: NSViewController, FileBrowsingView {
 // MARK: - 数据源 / 代理
 
 extension IconViewController: NSCollectionViewDataSource, NSCollectionViewDelegate {
-    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { nodes.count }
+    func numberOfSections(in collectionView: NSCollectionView) -> Int { groups.count }
+
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+        groups.indices.contains(section) ? groups[section].nodes.count : 0
+    }
 
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let item = collectionView.makeItem(withIdentifier: IconItem.identifier, for: indexPath)
-        guard let iconItem = item as? IconItem, indexPath.item < nodes.count else { return item }
-        let node = nodes[indexPath.item]
+        guard let iconItem = item as? IconItem, let node = node(at: indexPath) else { return item }
         iconItem.textField?.stringValue = node.name
         iconItem.textField?.toolTip = node.name
         iconItem.imageView?.image = node.displayIcon
         requestThumbnail(for: node)
         return iconItem
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, viewForSupplementaryElementOfKind kind: NSCollectionView.SupplementaryElementKind,
+                        at indexPath: IndexPath) -> NSView {
+        let header = collectionView.makeSupplementaryView(ofKind: kind, withIdentifier: SectionHeaderView.identifier, for: indexPath)
+        if let header = header as? SectionHeaderView, groups.indices.contains(indexPath.section) {
+            header.configure(title: groups[indexPath.section].title, count: groups[indexPath.section].nodes.count)
+        }
+        return header
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) { host?.selectionDidChange() }
@@ -121,17 +146,15 @@ extension IconViewController: NSCollectionViewDataSource, NSCollectionViewDelega
     func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool { true }
 
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
-        guard indexPath.item < nodes.count else { return nil }
-        return host?.pasteboardWriter(for: nodes[indexPath.item])
+        node(at: indexPath).flatMap { host?.pasteboardWriter(for: $0) }
     }
 
     // 拖入：放到文件夹图标上 = 放进那个文件夹，否则放到当前文件夹
     func collectionView(_ collectionView: NSCollectionView, validateDrop draggingInfo: NSDraggingInfo,
                         proposedIndexPath: AutoreleasingUnsafeMutablePointer<NSIndexPath>,
                         dropOperation: UnsafeMutablePointer<NSCollectionView.DropOperation>) -> NSDragOperation {
-        let index = proposedIndexPath.pointee.item
-        if dropOperation.pointee == .on, index < nodes.count, nodes[index].isFolder {
-            return host?.validateDrop(draggingInfo, onto: nodes[index]) ?? []
+        if dropOperation.pointee == .on, let folder = node(at: proposedIndexPath.pointee as IndexPath), folder.isFolder {
+            return host?.validateDrop(draggingInfo, onto: folder) ?? []
         }
         dropOperation.pointee = .before
         if contents?.searchQuery != nil { return [] }
@@ -140,7 +163,8 @@ extension IconViewController: NSCollectionViewDataSource, NSCollectionViewDelega
 
     func collectionView(_ collectionView: NSCollectionView, acceptDrop draggingInfo: NSDraggingInfo, indexPath: IndexPath,
                         dropOperation: NSCollectionView.DropOperation) -> Bool {
-        let target = dropOperation == .on && indexPath.item < nodes.count && nodes[indexPath.item].isFolder ? nodes[indexPath.item] : nil
+        let folder = node(at: indexPath)
+        let target = dropOperation == .on && folder?.isFolder == true ? folder : nil
         return host?.acceptDrop(draggingInfo, onto: target) ?? false
     }
 }
@@ -156,24 +180,62 @@ extension IconViewController: NSMenuDelegate {
 /// 记录双击与右键点到的项目，处理键盘
 @MainActor
 final class IconCollectionView: NSCollectionView {
-    var onDoubleClick: ((Int) -> Void)?
-    private(set) var clickedIndex: Int?
+    var onDoubleClick: ((IndexPath) -> Void)?
+    private(set) var clickedIndexPath: IndexPath?
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         if event.clickCount == 2, let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)) {
-            onDoubleClick?(path.item)
+            onDoubleClick?(path)
         }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        clickedIndex = indexPathForItem(at: convert(event.locationInWindow, from: nil))?.item
+        clickedIndexPath = indexPathForItem(at: convert(event.locationInWindow, from: nil))
         return super.menu(for: event)
     }
 
     override func keyDown(with event: NSEvent) {
         if FileViewKeys.handle(event, from: self) { return }
         super.keyDown(with: event)
+    }
+}
+
+/// 图标视图的分组标题：组名 + 项目数，下面一条细线（Finder 图标视图的样式）
+@MainActor
+final class SectionHeaderView: NSView, NSCollectionViewElement {
+    static let identifier = NSUserInterfaceItemIdentifier("SectionHeaderView")
+
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let countLabel = NSTextField(labelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        countLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        countLabel.textColor = .secondaryLabelColor
+        let line = NSBox.separator()
+        for v in [titleLabel, countLabel, line] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            titleLabel.bottomAnchor.constraint(equalTo: line.topAnchor, constant: -5),
+            countLabel.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 8),
+            countLabel.firstBaselineAnchor.constraint(equalTo: titleLabel.firstBaselineAnchor),
+            line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            line.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(title: String, count: Int) {
+        titleLabel.stringValue = title
+        countLabel.stringValue = String(localized: "\(count) 项")
     }
 }
 

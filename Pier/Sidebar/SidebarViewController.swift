@@ -198,7 +198,7 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
         case let .device(device):
             let cell = reuse(.init("device")) { SidebarCell(header: false, withEject: true) }
             cell.textField?.stringValue = device.name
-            cell.imageView?.image = NSImage(systemSymbolName: Self.symbol(for: device), accessibilityDescription: nil)
+            cell.imageView?.image = NSImage(systemSymbolName: DeviceSymbols.name(for: device), accessibilityDescription: nil)
             cell.ejectButton?.target = self
             cell.ejectButton?.action = #selector(ejectClicked(_:))
             if case .connecting = device.state { cell.ejectButton?.isHidden = true } else { cell.ejectButton?.isHidden = false }
@@ -206,8 +206,7 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
         case let .storage(device, storage):
             let cell = reuse(.init("storage")) { SidebarCell(header: false) }
             cell.textField?.stringValue = storage.displayName
-            let symbol = storage.displayName.localizedCaseInsensitiveContains("SD") ? "sdcard" : "internaldrive"
-            cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            cell.imageView?.image = NSImage(systemSymbolName: DeviceSymbols.name(for: storage), accessibilityDescription: nil)
             let free = Format.bytes(storage.info.freeSpace)
             cell.toolTip = device.quirks?.freeSpaceIsCached == true
                 ? String(localized: "约 \(free) 可用（连接时的数据），共 \(Format.bytes(storage.info.maxCapacity))")
@@ -225,12 +224,6 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
         let cell = make()
         cell.identifier = id
         return cell
-    }
-
-    private static func symbol(for device: MTPDevice) -> String {
-        let manufacturer = device.deviceInfo?.manufacturer ?? ""
-        if manufacturer.localizedCaseInsensitiveContains("Nintendo") { return "gamecontroller" }
-        return "candybarphone"
     }
 
     // MARK: 拖放：拖到存储上 = 上传 / 移动到它的根目录

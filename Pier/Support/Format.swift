@@ -1,4 +1,5 @@
 import AppKit
+import PierKit
 import UniformTypeIdentifiers
 
 @MainActor
@@ -56,5 +57,36 @@ enum FileTypes {
         }
         kindCache[ext] = kind
         return kind
+    }
+}
+
+/// 设备、存储的符号图标（侧边栏和路径栏共用，保证一致）
+@MainActor
+enum DeviceSymbols {
+    static func name(for device: MTPDevice) -> String {
+        let manufacturer = device.deviceInfo?.manufacturer ?? ""
+        if manufacturer.localizedCaseInsensitiveContains("Nintendo") { return "gamecontroller" }
+        return "candybarphone"
+    }
+
+    static func name(for storage: MTPStorage) -> String {
+        storage.displayName.localizedCaseInsensitiveContains("SD") ? "sdcard" : "internaldrive"
+    }
+
+    /// 固定 16×16 的方形图标，符号按原比例居中。
+    /// NSPathControl 会把每项的图片缩放成正方形，直接给符号图片时竖长的符号（手机、存储卡）会被拉宽。
+    static func squareIcon(_ name: String, side: CGFloat = 16) -> NSImage? {
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular)) else { return nil }
+        let size = NSSize(width: side, height: side)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let s = symbol.size
+            let scale = min(rect.width / s.width, rect.height / s.height, 1)
+            let w = s.width * scale, h = s.height * scale
+            symbol.draw(in: NSRect(x: (rect.width - w) / 2, y: (rect.height - h) / 2, width: w, height: h))
+            return true
+        }
+        image.isTemplate = true   // 跟随路径栏的文字颜色
+        return image
     }
 }

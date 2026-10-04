@@ -266,8 +266,8 @@ final class ContentViewController: NSViewController {
             item.image = image
             items.append(item)
         }
-        add(device.name, NSImage(systemSymbolName: "candybarphone", accessibilityDescription: nil))
-        add(storage.displayName, NSImage(systemSymbolName: "internaldrive", accessibilityDescription: nil))
+        add(device.name, DeviceSymbols.squareIcon(DeviceSymbols.name(for: device)))
+        add(storage.displayName, DeviceSymbols.squareIcon(DeviceSymbols.name(for: storage)))
         for folder in location.path { add(folder.name, FileTypes.icon(forName: folder.name, isFolder: true)) }
         pathControl.pathItems = items
     }

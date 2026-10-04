@@ -62,6 +62,7 @@ final class FileListViewController: NSViewController, FileBrowsingView {
         outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
         outlineView.setDraggingSourceOperationMask([.move, .copy, .link], forLocal: true)
         outlineView.draggingDestinationFeedbackStyle = .regular
+        outlineView.floatsGroupRows = true   // 分组标题滚动时停在顶部，和 Finder 一样
 
         let scroll = NSScrollView()
         scroll.documentView = outlineView
@@ -95,7 +96,9 @@ final class FileListViewController: NSViewController, FileBrowsingView {
             outlineView.tableColumns.first { $0.identifier == Column.modified }?.isHidden = !contents.hasDates
             outlineView.tableColumns.first { $0.identifier == Column.location }?.isHidden = contents.searchQuery == nil
             if outlineView.sortDescriptors != contents.sortDescriptors { outlineView.sortDescriptors = contents.sortDescriptors }
+            outlineView.compensatesGroupIndent = contents.isGrouped
             outlineView.reloadData()
+            if contents.isGrouped { contents.groups.forEach { outlineView.expandItem($0) } }
             restoreExpansion(contents.displayedNodes)
             var rows = IndexSet()
             for row in 0..<outlineView.numberOfRows {
@@ -232,21 +235,38 @@ extension FileListViewController: NSMenuDelegate {
 // MARK: - NSOutlineViewDataSource / Delegate
 
 extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate {
+    /// 顶层：分组时是各组，否则直接是项目
+    private var rootItems: [Any] {
+        guard let contents else { return [] }
+        return contents.isGrouped ? contents.groups : contents.displayedNodes
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let node = item as? FileNode else { return contents?.displayedNodes.count ?? 0 }
+        if item == nil { return rootItems.count }
+        if let group = item as? FileGroup { return group.nodes.count }
+        guard let node = item as? FileNode else { return 0 }
         if node.children == nil { contents?.loadChildren(of: node) }
         return node.children?.count ?? 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        guard let node = item as? FileNode else { return contents!.displayedNodes[index] }
-        return node.children![index]
+        if item == nil { return rootItems[index] }
+        if let group = item as? FileGroup { return group.nodes[index] }
+        return (item as! FileNode).children![index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        if item is FileGroup { return true }
         guard let node = item as? FileNode else { return false }
         return node.isFolder && contents?.searchQuery == nil
     }
+
+    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool { item is FileGroup }
+
+    // 分组标题不能折叠、不能选中
+    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { !(item is FileGroup) }
+    func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool { !(item is FileGroup) }
+    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { !(item is FileGroup) }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
         if let node = notification.userInfo?["NSObject"] as? FileNode { expanded.insert(ObjectIdentifier(node)) }
@@ -265,6 +285,11 @@ extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        if let group = item as? FileGroup {
+            let cell = (outlineView.makeView(withIdentifier: GroupHeaderCell.identifier, owner: nil) as? GroupHeaderCell) ?? GroupHeaderCell()
+            cell.configure(title: group.title, count: group.nodes.count)
+            return cell
+        }
         guard let node = item as? FileNode, let column = tableColumn else { return nil }
         let cell = makeCell(column.identifier, withImage: column.identifier == Column.name)
         let field = cell.textField!
@@ -332,7 +357,7 @@ extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
         // 放到文件上 = 放到它所在的文件夹；放在行与行之间 = 放到那一层的文件夹
-        var target = item as? FileNode
+        var target = item as? FileNode   // 放在分组标题上 = 当前文件夹
         if let node = target, !node.isFolder { target = node.parent }
         if contents?.searchQuery != nil && target == nil { return [] }
         outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
@@ -347,8 +372,70 @@ extension FileListViewController: NSOutlineViewDataSource, NSOutlineViewDelegate
 /// 处理 Finder 式键盘操作：⌘↓ 打开、空格 Quick Look、回车改名
 @MainActor
 final class FileOutlineView: NSOutlineView {
+    /// 分组时项目是分组标题的子项，大纲视图会多缩进一级；Finder 不缩进，这里往回挪一级
+    var compensatesGroupIndent = false
+
+    private func shift(forRow row: Int) -> CGFloat {
+        guard compensatesGroupIndent, level(forRow: row) > 0 else { return 0 }
+        return indentationPerLevel
+    }
+
+    override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+        var frame = super.frameOfCell(atColumn: column, row: row)
+        let shift = shift(forRow: row)
+        if shift > 0, column == self.column(withIdentifier: outlineTableColumn?.identifier ?? .init("")) {
+            frame.origin.x -= shift
+            frame.size.width += shift
+        }
+        return frame
+    }
+
+    override func frameOfOutlineCell(atRow row: Int) -> NSRect {
+        var frame = super.frameOfOutlineCell(atRow: row)
+        frame.origin.x -= shift(forRow: row)
+        return frame
+    }
+
     override func keyDown(with event: NSEvent) {
         if FileViewKeys.handle(event, from: self) { return }
         super.keyDown(with: event)
+    }
+}
+
+/// 分组标题行：组名 + 项目数（列表、分栏视图共用）
+@MainActor
+final class GroupHeaderCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("GroupHeaderCell")
+
+    private let countLabel = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        let title = NSTextField(labelWithString: "")
+        title.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        title.textColor = .secondaryLabelColor
+        countLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        countLabel.textColor = .tertiaryLabelColor
+        for v in [title, countLabel] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        textField = title
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            countLabel.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 6),
+            countLabel.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
+            countLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(title: String, count: Int) {
+        textField?.stringValue = title
+        countLabel.stringValue = String(localized: "\(count) 项")
     }
 }

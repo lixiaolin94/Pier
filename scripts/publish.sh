@@ -17,11 +17,18 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "✗ 本地没�
 [[ -z "$(git status --porcelain)" ]] || { echo "✗ 工作区不干净"; exit 1; }
 if gh release view "$TAG" >/dev/null 2>&1; then echo "✗ GitHub 上已经有 $TAG 的 Release"; exit 1; fi
 
-scripts/release.sh
+# 公证过的包已经在了（比如上次在后面的步骤失败）就不重复构建；SKIP_BUILD=0 强制重来
+if [[ "${SKIP_BUILD:-auto}" == auto && -f build/release/Pier-$VERSION.zip ]] \
+   && spctl -a -t install build/release/export/Pier.app >/dev/null 2>&1; then
+  echo "▸ 复用已公证的 build/release/Pier-$VERSION.zip"
+else
+  scripts/release.sh
+fi
 
-# 私钥从钥匙串导出到临时文件，用完就删
-KEY_FILE=$(mktemp)
-trap 'rm -f "$KEY_FILE"' EXIT
+# 私钥从钥匙串导出到临时目录（generate_keys -x 拒绝覆盖已存在的文件，所以不能用 mktemp 建好的文件），用完就删
+KEY_DIR=$(mktemp -d)
+KEY_FILE="$KEY_DIR/sparkle_ed_key"
+trap 'rm -rf "$KEY_DIR"' EXIT
 SPARKLE_VERSION=$(sed -n 's/^SPARKLE_VERSION=\([0-9.]*\).*/\1/p' scripts/make_appcast.sh)
 if [[ ! -x build/sparkle-tools/bin/generate_keys ]]; then
   mkdir -p build/sparkle-tools
@@ -30,7 +37,7 @@ if [[ ! -x build/sparkle-tools/bin/generate_keys ]]; then
 fi
 build/sparkle-tools/bin/generate_keys -x "$KEY_FILE" >/dev/null
 SPARKLE_ED_PRIVATE_KEY="$(cat "$KEY_FILE")" scripts/make_appcast.sh
-rm -f "$KEY_FILE"
+rm -rf "$KEY_DIR"
 
 NOTES=$(mktemp)
 awk -v v="## $VERSION" 'index($0, v) == 1 {on=1; next} /^## / {on=0} on' CHANGELOG.md > "$NOTES"

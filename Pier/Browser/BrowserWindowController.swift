@@ -141,7 +141,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func viewModeDidChange() {
-        viewModeItem?.selectedIndex = content.viewMode == .icon ? 0 : 1
+        viewModeItem?.selectedIndex = ContentViewController.ViewMode.allCases.firstIndex(of: content.viewMode) ?? 1
     }
 
     // MARK: NSWindowDelegate
@@ -221,8 +221,11 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
     @objc func toggleStatusBar(_ sender: Any?) { content.toggleStatusBar() }
 
     // 焦点在侧边栏时，文件动作也要能用：转给内容区
-    @objc func showAsList(_ sender: Any?) { content.showAsList(sender) }
+    @objc func toggleHiddenFiles(_ sender: Any?) { content.toggleHiddenFiles(sender) }
     @objc func showAsIcons(_ sender: Any?) { content.showAsIcons(sender) }
+    @objc func showAsList(_ sender: Any?) { content.showAsList(sender) }
+    @objc func showAsColumns(_ sender: Any?) { content.showAsColumns(sender) }
+    @objc func showAsGallery(_ sender: Any?) { content.showAsGallery(sender) }
     @objc func newFolder(_ sender: Any?) { content.newFolder(sender) }
     @objc func openSelection(_ sender: Any?) { content.openSelection(sender) }
     @objc func openSelectionInNewTab(_ sender: Any?) { content.openSelectionInNewTab(sender) }
@@ -233,7 +236,6 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
     @objc func renameSelection(_ sender: Any?) { content.renameSelection(sender) }
     @objc func quickLook(_ sender: Any?) { content.quickLook(sender) }
     @objc func showEnclosingFolder(_ sender: Any?) { content.showEnclosingFolder(sender) }
-    @objc func addToSidebar(_ sender: Any?) { content.addToSidebar(sender) }
 
     @objc func showTransfers(_ sender: Any?) {
         if let popover = transfersPopover, popover.isShown {
@@ -263,10 +265,10 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
         case #selector(toggleStatusBar(_:)):
             item.title = content.isStatusBarVisible ? String(localized: "隐藏状态栏") : String(localized: "显示状态栏")
             return true
-        case #selector(showAsList(_:)), #selector(showAsIcons(_:)), #selector(newFolder(_:)), #selector(openSelection(_:)),
+        case #selector(toggleHiddenFiles(_:)), #selector(showAsIcons(_:)), #selector(showAsList(_:)), #selector(showAsColumns(_:)), #selector(showAsGallery(_:)), #selector(newFolder(_:)), #selector(openSelection(_:)),
              #selector(openSelectionInNewTab(_:)), #selector(getInfo(_:)), #selector(downloadSelection(_:)), #selector(upload(_:)),
              #selector(deleteSelection(_:)), #selector(renameSelection(_:)), #selector(quickLook(_:)),
-             #selector(showEnclosingFolder(_:)), #selector(addToSidebar(_:)):
+             #selector(showEnclosingFolder(_:)):
             return content.validateMenuItem(item)
         default:
             return validate(item.action)
@@ -294,6 +296,7 @@ private extension NSToolbarItem.Identifier {
     static let back = Self("back")
     static let forward = Self("forward")
     static let viewMode = Self("viewMode")
+    static let reload = Self("reload")
     static let actions = Self("actions")
     static let transfers = Self("transfers")
     static let search = Self("search")
@@ -301,11 +304,11 @@ private extension NSToolbarItem.Identifier {
 
 extension BrowserWindowController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .flexibleSpace, .viewMode, .actions, .transfers, .search]
+        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .flexibleSpace, .viewMode, .reload, .actions, .transfers, .search]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .viewMode, .actions, .transfers, .search, .flexibleSpace, .space]
+        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .viewMode, .reload, .actions, .transfers, .search, .flexibleSpace, .space]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -317,21 +320,27 @@ extension BrowserWindowController: NSToolbarDelegate {
         case .forward:
             return button(id, symbol: "chevron.right", label: String(localized: "前进"), action: #selector(goForward(_:)), navigational: true)
         case .viewMode:
+            // 和 Finder 相同的四个符号与顺序
+            let labels = [String(localized: "图标"), String(localized: "列表"), String(localized: "分栏"), String(localized: "画廊")]
+            let symbols = ["square.grid.2x2", "list.bullet", "rectangle.split.3x1", "squares.below.rectangle"]
             let group = NSToolbarItemGroup(itemIdentifier: id,
-                                           images: [symbol("square.grid.2x2"), symbol("list.bullet")],
+                                           images: zip(symbols, labels).map { NSImage(systemSymbolName: $0, accessibilityDescription: $1) ?? NSImage() },
                                            selectionMode: .selectOne,
-                                           labels: [String(localized: "图标"), String(localized: "列表")],
+                                           labels: labels,
                                            target: self, action: #selector(viewModeChanged(_:)))
             group.label = String(localized: "显示")
-            group.selectedIndex = content.viewMode == .icon ? 0 : 1
+            group.selectedIndex = ContentViewController.ViewMode.allCases.firstIndex(of: content.viewMode) ?? 1
             viewModeItem = group
             return group
+        case .reload:
+            return button(id, symbol: "arrow.clockwise", label: String(localized: "刷新"), action: #selector(reload(_:)))
         case .actions:
             let item = NSMenuToolbarItem(itemIdentifier: id)
             item.image = symbol("ellipsis.circle")
             item.label = String(localized: "操作")
             item.toolTip = item.label
             item.menu = actionsMenu()
+            item.showsIndicator = false   // Finder 的「操作」按钮没有下拉箭头
             return item
         case .transfers:
             let item = button(id, symbol: "arrow.down.circle", label: String(localized: "传输"), action: #selector(showTransfers(_:)))
@@ -342,7 +351,7 @@ extension BrowserWindowController: NSToolbarDelegate {
         case .search:
             let item = NSSearchToolbarItem(itemIdentifier: id)
             item.label = String(localized: "搜索")
-            item.searchField.placeholderString = String(localized: "搜索（回车搜索子文件夹）")
+            item.searchField.toolTip = String(localized: "输入时过滤当前文件夹，按回车搜索所有子文件夹")
             item.searchField.target = self
             item.searchField.action = #selector(searchChanged(_:))
             item.searchField.sendsSearchStringImmediately = true
@@ -360,7 +369,7 @@ extension BrowserWindowController: NSToolbarDelegate {
 
     private func button(_ id: NSToolbarItem.Identifier, symbol name: String, label: String, action: Selector, navigational: Bool = false) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: id)
-        item.image = symbol(name)
+        item.image = NSImage(systemSymbolName: name, accessibilityDescription: label)
         item.label = label
         item.toolTip = label
         item.action = action
@@ -381,13 +390,13 @@ extension BrowserWindowController: NSToolbarDelegate {
         m.addItem(withTitle: String(localized: "重新命名"), action: #selector(BrowserActions.renameSelection(_:)), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: String(localized: "删除"), action: #selector(BrowserActions.deleteSelection(_:)), keyEquivalent: "")
-        m.addItem(.separator())
-        m.addItem(withTitle: String(localized: "刷新"), action: #selector(BrowserActions.reload(_:)), keyEquivalent: "")
         return m
     }
 
     @objc private func viewModeChanged(_ sender: NSToolbarItemGroup) {
-        content.setViewMode(sender.selectedIndex == 0 ? .icon : .list)
+        let modes = ContentViewController.ViewMode.allCases
+        guard modes.indices.contains(sender.selectedIndex) else { return }
+        content.setViewMode(modes[sender.selectedIndex])
     }
 
     /// 输入过程中只过滤当前文件夹

@@ -60,9 +60,10 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: Pier/Resources/Pier.entitlements
-        # Debug 用 ad-hoc 签名，Release 用 Developer ID（经典证书，CI 也能用）
+        # Debug 用 Apple Development 证书：签名身份每次构建都一样，macOS 的「允许配件连接」只问一次
+        # （ad-hoc 签名每次构建都变，系统会当成新 app 反复询问）。Release 用 Developer ID。
         CODE_SIGN_STYLE: Manual
-        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: YWQ4TY4VR5
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
       configs:

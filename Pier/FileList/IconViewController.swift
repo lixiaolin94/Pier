@@ -7,7 +7,7 @@ final class IconViewController: NSViewController, FileBrowsingView {
     weak var host: FileViewHost?
 
     private let collectionView = IconCollectionView()
-    private var thumbnailTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    private let thumbnails = ThumbnailRequests()
     private var contents: FolderContents? { host?.contents }
     private var nodes: [FileNode] { contents?.displayedNodes ?? [] }
 
@@ -48,11 +48,7 @@ final class IconViewController: NSViewController, FileBrowsingView {
         guard isViewLoaded, case .reload = change else { return }
         let selected = Set(selectedNodes.map(ObjectIdentifier.init))
         // 换了文件夹：之前排队的缩略图不要了
-        let current = Set(nodes.map(ObjectIdentifier.init))
-        for (id, task) in thumbnailTasks where !current.contains(id) {
-            task.cancel()
-            thumbnailTasks[id] = nil
-        }
+        thumbnails.keep(only: nodes)
         collectionView.reloadData()
         let paths = nodes.enumerated().filter { selected.contains(ObjectIdentifier($0.element)) }.map { IndexPath(item: $0.offset, section: 0) }
         collectionView.selectionIndexPaths = Set(paths)
@@ -87,44 +83,17 @@ final class IconViewController: NSViewController, FileBrowsingView {
         return window.convertToScreen(image.convert(image.bounds, to: nil))
     }
 
-    /// 图标视图里用对话框改名
     func beginRename(_ node: FileNode) {
         guard let window = view.window else { return }
         select([node])
-        let alert = NSAlert()
-        alert.messageText = String(localized: "重新命名“\(node.name)”")
-        let field = NSTextField(string: node.name)
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 22)
-        alert.accessoryView = field
-        alert.addButton(withTitle: String(localized: "重新命名"))
-        alert.addButton(withTitle: String(localized: "取消"))
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self] response in
-            MainActor.assumeIsolated {
-                guard response == .alertFirstButtonReturn else { return }
-                self?.host?.commitRename(node, to: field.stringValue)
-            }
-        }
-        DispatchQueue.main.async { field.selectBaseName() }
+        RenamePrompt.run(node, in: window, host: host)
     }
 
-    // MARK: 缩略图
-
     private func requestThumbnail(for node: FileNode) {
-        let id = ObjectIdentifier(node)
-        guard node.thumbnail == nil, thumbnailTasks[id] == nil, let device = contents?.device,
-              LocalCopies.shared.canThumbnail(node.object) else { return }
-        thumbnailTasks[id] = Task { [weak self, weak node] in
-            guard let object = node?.object else { return }
-            let image = await LocalCopies.shared.thumbnail(for: object, on: device, size: CGSize(width: 128, height: 128))
-            guard let self, let node, !Task.isCancelled else { return }
-            self.thumbnailTasks[id] = nil
-            guard let image else { return }
-            node.thumbnail = image
-            if let index = self.nodes.firstIndex(of: node),
-               let item = self.collectionView.item(at: IndexPath(item: index, section: 0)) as? IconItem {
-                item.imageView?.image = image
-            }
+        thumbnails.request(node, device: contents?.device, size: 128) { [weak self] node in
+            guard let self, let index = self.nodes.firstIndex(of: node),
+                  let item = self.collectionView.item(at: IndexPath(item: index, section: 0)) as? IconItem else { return }
+            item.imageView?.image = node.displayIcon
         }
     }
 }
@@ -140,7 +109,7 @@ extension IconViewController: NSCollectionViewDataSource, NSCollectionViewDelega
         let node = nodes[indexPath.item]
         iconItem.textField?.stringValue = node.name
         iconItem.textField?.toolTip = node.name
-        iconItem.imageView?.image = node.thumbnail ?? FileTypes.icon(forName: node.name, isFolder: node.isFolder)
+        iconItem.imageView?.image = node.displayIcon
         requestThumbnail(for: node)
         return iconItem
     }

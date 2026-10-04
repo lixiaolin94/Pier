@@ -6,15 +6,18 @@ import Quartz
 /// 所有文件操作都在这里实现，两种视图共用。
 @MainActor
 final class ContentViewController: NSViewController {
-    enum ViewMode: String { case list, icon }
+    /// 和 Finder 一样的四种显示方式（顺序与工具栏、⌘1–⌘4 一致）
+    enum ViewMode: String, CaseIterable { case icon, list, column, gallery }
 
     weak var browser: BrowserWindowController?
 
     let contents = FolderContents()
-    private let listView = FileListViewController()
-    private let iconView = IconViewController()
+    private let views: [ViewMode: FileBrowsingView] = [
+        .icon: IconViewController(), .list: FileListViewController(),
+        .column: ColumnViewController(), .gallery: GalleryViewController(),
+    ]
     private(set) var viewMode: ViewMode = .list
-    private var currentView: FileBrowsingView { viewMode == .list ? listView : iconView }
+    private var currentView: FileBrowsingView { views[viewMode]! }
 
     private let fileContainer = NSView()
     private let pathControl = PathBarControl()
@@ -42,10 +45,10 @@ final class ContentViewController: NSViewController {
         UserDefaults.standard.register(defaults: [Self.pathBarKey: true, Self.statusBarKey: true])
         let root = NSView()
 
-        listView.host = self
-        iconView.host = self
-        addChild(listView)
-        addChild(iconView)
+        for mode in ViewMode.allCases {
+            views[mode]!.host = self
+            addChild(views[mode]!)
+        }
         fileContainer.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(fileContainer)
 
@@ -94,7 +97,7 @@ final class ContentViewController: NSViewController {
         placeholderTitle.stringValue = String(localized: "未连接设备")
         placeholderTitle.font = .systemFont(ofSize: 17, weight: .semibold)
         placeholderTitle.textColor = .secondaryLabelColor
-        let hint = NSTextField(wrappingLabelWithString: String(localized: "用数据线连接 Android 设备，并在设备上选择「文件传输」（MTP）模式。"))
+        let hint = NSTextField(wrappingLabelWithString: String(localized: "用数据线连接 Android 设备，并在设备上选择「文件传输」（MTP）模式。如果 macOS 询问是否允许配件连接，请选择「允许」。"))
         hint.textColor = .tertiaryLabelColor
         hint.alignment = .center
         hint.preferredMaxLayoutWidth = 320
@@ -301,11 +304,13 @@ final class ContentViewController: NSViewController {
         } else {
             parts.append(contents.searchQuery != nil ? String(localized: "找到 \(count) 项") : String(localized: "\(count) 项"))
         }
-        // DBI 的剩余空间是连接时的缓存值
+        // DBI 的剩余空间是连接时的缓存值：数字前加"约"，说明放在悬停提示里
         if device.quirks?.freeSpaceIsCached == true {
-            parts.append(String(localized: "约 \(Format.bytes(storage.info.freeSpace)) 可用（连接时的数据）"))
+            parts.append(String(localized: "约 \(Format.bytes(storage.info.freeSpace)) 可用"))
+            statusLabel.toolTip = String(localized: "这台设备只在连接时报告一次剩余空间，传输后不会更新。")
         } else {
             parts.append(String(localized: "\(Format.bytes(storage.info.freeSpace)) 可用"))
+            statusLabel.toolTip = nil
         }
         if storage.isReadOnly { parts.append(String(localized: "只读")) }
         statusLabel.stringValue = parts.joined(separator: "，")
@@ -399,7 +404,6 @@ extension ContentViewController: FileViewHost {
         add(String(localized: "重新命名"), #selector(renameSelection(_:)))
         menu.addItem(.separator())
         add(String(localized: "拷贝"), #selector(copy(_:)))
-        if nodes.count == 1 && nodes[0].isFolder { add(String(localized: "添加到边栏"), #selector(addToSidebar(_:))) }
         menu.addItem(.separator())
         add(String(localized: "删除"), #selector(deleteSelection(_:)))
     }
@@ -502,12 +506,38 @@ extension ContentViewController: BrowserActions, NSMenuItemValidation {
         FileOperations.confirmAndDelete(actionNodes, in: contents, window: view.window)
     }
 
+    /// ⌘C：先下载到本机缓存再放文件 URL（Finder 粘贴不接受文件承诺），见 ClipboardExport
     @objc func copy(_ sender: Any?) {
-        let writers = actionNodes.compactMap(pasteboardWriter(for:))
-        guard !writers.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.writeObjects(writers)
+        let items = references(actionNodes)
+        guard !items.isEmpty else { return }
+        let total = items.filter { !$0.isFolder }.reduce(UInt64(0)) { $0 + $1.size }
+        if total > ClipboardExport.confirmThreshold {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "拷贝的内容较大（\(Format.bytes(total))）")
+            alert.informativeText = String(localized: "要在 Finder 里粘贴，需要先把它们完整下载到本机缓存。更快的做法是直接拖到 Finder，或者用「下载到…」。")
+            alert.addButton(withTitle: String(localized: "仍然拷贝"))
+            alert.addButton(withTitle: String(localized: "下载到…"))
+            alert.addButton(withTitle: String(localized: "取消"))
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: break
+            case .alertSecondButtonReturn: downloadSelection(sender); return
+            default: return
+            }
+        }
+        let count = items.count
+        flashStatus(String(localized: "正在准备拷贝 \(count) 项…"))
+        ClipboardExport.shared.copy(items) { [weak self] failure in
+            if let failure {
+                self?.flashStatus(nil)
+                FileOperations.showMessage(String(localized: "拷贝失败"), detail: failure, window: self?.view.window)
+            } else {
+                self?.flashStatus(String(localized: "已拷贝 \(count) 项，可以到 Finder 里粘贴"))
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(4))
+                    self?.flashStatus(nil)
+                }
+            }
+        }
     }
 
     @objc func paste(_ sender: Any?) {
@@ -515,21 +545,24 @@ extension ContentViewController: BrowserActions, NSMenuItemValidation {
         let pasteboard = NSPasteboard.general
         let urls = FileOperations.fileURLs(from: pasteboard)
         if urls.isEmpty, !RemoteItemReference.read(from: pasteboard).isEmpty {
-            FileOperations.showMessage(String(localized: "暂不支持在设备内复制"),
-                                       detail: String(localized: "可以把项目拖到其他文件夹来移动，或者先下载再上传。"), window: view.window)
+            // 拷贝的项目还在下载到缓存；下载完剪贴板里就有文件 URL，粘贴 = 把副本上传（设备内复制）
+            FileOperations.showMessage(String(localized: "拷贝的项目还没准备好"),
+                                       detail: String(localized: "正在把它们下载到本机，完成后再粘贴即可（进度见传输列表）。"), window: view.window)
             return
         }
         let siblings = contents.siblingNames(in: nil)
         Task { await FileOperations.upload(urls, to: location, knownSiblings: siblings, window: view.window) }
     }
 
-    @objc func addToSidebar(_ sender: Any?) {
-        guard let node = actionNodes.first, node.isFolder, let target = location(of: node)?.stored else { return }
-        Favorites.shared.add(target)
+    @objc func toggleHiddenFiles(_ sender: Any?) {
+        UserDefaults.standard.set(!FolderContents.showsHiddenFiles, forKey: FolderContents.hiddenFilesKey)
+        NotificationCenter.default.post(name: FolderContents.hiddenFilesDidChange, object: nil)
     }
 
-    @objc func showAsList(_ sender: Any?) { setViewMode(.list) }
     @objc func showAsIcons(_ sender: Any?) { setViewMode(.icon) }
+    @objc func showAsList(_ sender: Any?) { setViewMode(.list) }
+    @objc func showAsColumns(_ sender: Any?) { setViewMode(.column) }
+    @objc func showAsGallery(_ sender: Any?) { setViewMode(.gallery) }
 
     // 导航类动作交给窗口控制器
     @objc func goBack(_ sender: Any?) { browser?.goBack(sender) }
@@ -556,15 +589,17 @@ extension ContentViewController: BrowserActions, NSMenuItemValidation {
         case #selector(deleteSelection(_:)):
             return !nodes.isEmpty && storage?.info.accessCapability != .readOnlyWithoutDeletion && quirks?.canDelete == true
         case #selector(paste(_:)):
-            return isWritable && !searching && NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-        case #selector(addToSidebar(_:)):
-            return nodes.count == 1 && nodes[0].isFolder
-        case #selector(showAsList(_:)):
-            item.state = viewMode == .list ? .on : .off
+            let pasteboard = NSPasteboard.general
+            return isWritable && !searching && (pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+                                                || pasteboard.availableType(from: [.pierItem]) != nil)
+        case #selector(toggleHiddenFiles(_:)):
+            item.state = FolderContents.showsHiddenFiles ? .on : .off
             return true
-        case #selector(showAsIcons(_:)):
-            item.state = viewMode == .icon ? .on : .off
-            return true
+        case #selector(showAsIcons(_:)), #selector(showAsList(_:)), #selector(showAsColumns(_:)), #selector(showAsGallery(_:)):
+            let modes: [Selector: ViewMode] = [#selector(showAsIcons(_:)): .icon, #selector(showAsList(_:)): .list,
+                                               #selector(showAsColumns(_:)): .column, #selector(showAsGallery(_:)): .gallery]
+            item.state = modes[item.action!] == viewMode ? .on : .off
+            return location?.resolved != nil
         default:
             return browser?.validateMenuItem(item) ?? false
         }

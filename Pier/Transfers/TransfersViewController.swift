@@ -7,32 +7,25 @@ final class TransfersViewController: NSViewController {
     private let tableView = NSTableView()
     private let emptyLabel = NSTextField(labelWithString: String(localized: "没有传输任务"))
     private let clearButton = NSButton(title: String(localized: "清除已完成"), target: nil, action: nil)
+    private let footer = NSView()
     private var transfers: [Transfer] = []
     private var heightConstraint: NSLayoutConstraint?
 
     private var queue: TransferQueue { Services.transfers }
 
     override func loadView() {
-        let title = NSTextField(labelWithString: String(localized: "传输"))
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        clearButton.bezelStyle = .inline
-        clearButton.controlSize = .small
-        clearButton.target = self
-        clearButton.action = #selector(clearFinished(_:))
-        let header = NSStackView(views: [title, NSView(), clearButton])
-        header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 6, right: 10)
-
         let column = NSTableColumn(identifier: .init("transfer"))
         tableView.addTableColumn(column)
         tableView.headerView = nil
         tableView.style = .plain
-        tableView.rowHeight = 58
+        tableView.rowHeight = 60
         tableView.intercellSpacing = .zero
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
+        tableView.gridStyleMask = .solidHorizontalGridLineMask
+        tableView.gridColor = .separatorColor
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.usesAutomaticRowHeights = false
 
         let scroll = NSScrollView()
         scroll.documentView = tableView
@@ -44,9 +37,24 @@ final class TransfersViewController: NSViewController {
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [header, NSBox.separator(), scroll])
+        // 只有存在已结束的任务时才出现的底栏
+        clearButton.isBordered = false
+        clearButton.contentTintColor = .controlAccentColor
+        clearButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        clearButton.target = self
+        clearButton.action = #selector(clearFinished(_:))
+        let line = NSBox.separator()
+        for v in [line, clearButton] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            footer.addSubview(v)
+        }
+        footer.translatesAutoresizingMaskIntoConstraints = false
+
+        // 竖排：隐藏的底栏不占位置
+        let stack = NSStackView(views: [scroll, footer])
         stack.orientation = .vertical
         stack.spacing = 0
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 0, right: 0)
         stack.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView()
         root.addSubview(stack)
@@ -58,9 +66,15 @@ final class TransfersViewController: NSViewController {
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.widthAnchor.constraint(equalToConstant: 420),
+            scroll.widthAnchor.constraint(equalToConstant: 400),
             height,
+            footer.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            line.topAnchor.constraint(equalTo: footer.topAnchor),
+            line.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            clearButton.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -12),
+            clearButton.topAnchor.constraint(equalTo: line.bottomAnchor, constant: 6),
+            clearButton.bottomAnchor.constraint(equalTo: footer.bottomAnchor, constant: -6),
             emptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
         ])
@@ -89,8 +103,8 @@ final class TransfersViewController: NSViewController {
             tableView.reloadData()
         }
         emptyLabel.isHidden = !transfers.isEmpty
-        clearButton.isEnabled = transfers.contains { $0.state.isFinished }
-        heightConstraint?.constant = min(max(CGFloat(transfers.count) * tableView.rowHeight, 80), 460)
+        footer.isHidden = !transfers.contains { $0.state.isFinished }
+        heightConstraint?.constant = min(max(CGFloat(transfers.count) * tableView.rowHeight, 80), 480)
     }
 
     @objc private func clearFinished(_ sender: Any?) { queue.clearFinished() }

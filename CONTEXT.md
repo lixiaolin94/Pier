@@ -34,9 +34,9 @@
 **App**：
 - `FileList/FolderContents`：列表和图标视图共用的本地目录模型，操作后直接更新；`ModelEvents` 通知让多个 tab 同步；`MoveLedger` 记下 DBI 上的移动，列目录时补上。
 - 列表视图（行内改名，回车改名，非法名字在编辑框旁提示）+ 图标视图（`NSCollectionView`，≤24 MB 的图片在后台生成缩略图）；按文件夹记住显示方式。
-- 拖放：拖到 Finder 用 `RemoteFilePromiseProvider`（同时带 `.pierItem`，窗口内拖动 = 移动）；从 Finder 拖进列表、文件夹行、图标、路径栏某一级、侧边栏的存储/收藏 = 上传；把文件夹拖进「收藏」分组 = 添加收藏。⌘C/⌘V 同样走这两种剪贴板内容。
+- 拖放：拖到 Finder 用 `RemoteFilePromiseProvider`（同时带 `.pierItem`，窗口内拖动 = 移动）；从 Finder 拖进列表、文件夹行、图标、路径栏某一级、侧边栏的存储 = 上传。⌘C 见 0.1.2 的 ClipboardExport。
 - Finder 式冲突对话框（替换 / 保留两者 / 跳过 / 停止，可应用到全部；只是按 DBI 规则冲突时不提供"替换"）。
-- 新建文件夹（⇧⌘N，建好后直接进入改名）、删除（必须确认，提示文件夹会递归删除）、显示简介（⌘I）、Quick Look（空格 / ⌘Y，先下载到缓存，>512 MB 不自动下载）、双击用默认 app 打开、递归搜索（搜索框按回车）、侧边栏收藏（`favorites.json`）、传输 popover（⌥⌘L）、工具栏进度环、窗口与 tab 恢复（设备连上之前显示"等待…连接"）、退出前和拔线时提醒。
+- 新建文件夹（⇧⌘N，建好后直接进入改名）、删除（必须确认，提示文件夹会递归删除）、显示简介（⌘I）、Quick Look（空格 / ⌘Y，先下载到缓存，>512 MB 不自动下载）、双击用默认 app 打开、递归搜索（搜索框按回车）、传输 popover（⌥⌘L）、工具栏进度环、窗口与 tab 恢复（设备连上之前显示"等待…连接"）、退出前和拔线时提醒。
 - 快捷键调整：刷新改为 ⇧⌘R，⌘R 是"显示所在文件夹"（与 Finder 一致）。
 
 **已实机验证（DBI，测试只在 `1: SD Card/Pier-test/` 里写，测完已用 Pier 删掉）**：新建文件夹 + 行内改名；⌘V 上传（100 MB 分段写、小文件、带中文名的文件夹树、0 字节文件）；「下载到…」下回来的 100 MB 文件 SHA-1 与原文件一致（分段写 + 分块读整条链路无损）；失败任务重试（会删掉上次留下的残缺对象再重传）；Quick Look；图标视图；列表里拖到文件夹 = 移动；递归搜索（结果带「位置」列）；收藏；删除确认（默认按钮是「取消」）；任务持久化；正常退出后恢复窗口位置。
@@ -46,9 +46,18 @@
 - 搜索框回车改用 delegate 的 `insertNewline:` 判断，不再看 currentEvent。
 - 窗口恢复：要在 window 上 invalidate（而不是 window controller 上），并注册 `NSQuitAlwaysKeepsWindows`。不这样做的话，系统设置为"退出时关闭窗口"时，正常退出后不会恢复。
 **还没验证**：⌘C 后到 Finder 里 ⌘V（没有拿到 Finder 的控制权限）、拖到 Finder、图片缩略图（测试目录里没有图片）、PTP 事件是否真的会送到。另外，自动化工具拖动图标视图里的项目没有触发拖拽，需要人工试一下。
+**0.1.2 界面调整**：去掉侧边栏收藏；四种显示方式（图标 / 列表 / 分栏 `ColumnViewController` / 画廊 `GalleryViewController`）；工具栏加刷新；默认隐藏 "." 开头的文件（⌘⇧.）；传输列表去掉标题栏。Debug 构建改用 Apple Development 证书签名：ad-hoc 签名每次构建身份都变，macOS 会反复弹「允许配件连接」。教训：分栏、画廊里随内容缩放的图片视图要把 hugging / compression 降到最低，否则它的固有尺寸会把整个内容区（连路径栏、状态栏）压扁。
+
+**0.1.2 实机结论（2026-10-04，DBI）**：
+- **Finder 粘贴不接受剪贴板上的 NSFilePromiseProvider**：剪贴板里确实有 promise 类型，⌘V 后 Finder 什么也不做，Pier 也收不到写入请求。拖拽到 Finder 是接受的（3 个文件逐字节一致，没有残留 `.pierdownload`）。所以 ⌘C 改成 `ClipboardExport`：先经传输队列下载到 `~/Library/Caches/work.xiaolin.Pier/Clipboard/<uuid>/`，完成后写入 file URL + `.pierItem`（剪贴板 changeCount 变了就不覆盖）。
+- **DBI 不会为主机发起的操作发 PTP 事件**：上传文件夹、删除等操作期间日志里没有任何事件。设备端自己产生的变化会不会发事件还没测（需要在 Switch 上操作）。事件日志已提到 info 级别，以后能直接查到。
+- **"设备不出现"的真正原因**：macOS 的「允许配件连接」弹窗（UserNotificationCenter）在后台等待确认时，ICDeviceBrowser 就看不到设备。之前把它归因于强行结束 Pier 和 ptpcamerad 状态，很可能是错的。「未连接设备」页面已加提示。
+- 缩略图（jpg/png，在后台下载后用 QLThumbnailGenerator 生成）正常；图标视图拖拽正常。之前没触发，是自动化工具拖得太快。
+- 从 Finder 拖入：自动化工具没能模拟出跨 app 拖拽，代码路径和 ⌘V 上传相同（⌘V 已实测）。
+
 **已知限制**：
 - DBI 移动后的目录缓存问题：`MoveLedger` 只存在内存里，重启 Pier 后，DBI 又会在原目录里列出已经移走的文件（文件实际已经移动，这是 DBI 的缓存，AFT 也一样）。
-- Pier 被强行结束后，ptpcamerad 会看不到 DBI，需要重新插拔。现在正常退出时会主动关闭会话。
+- 设备有时不出现：多半是 macOS 的「允许配件连接」弹窗在等待确认（见上面 0.1.2 结论）。正常退出时 Pier 会主动关闭会话。
 - SD 卡根目录里有 spike 留下的 `g-move-to-0.bin`、`tomove.bin`（DBI 重新扫描后才出现），没有动，留给用户决定要不要删。
 - **下一阶段**：补完上面没验证的几项；>4 GB NSP 往 DBI 安装存储的分段写验证（需用户同意）；分栏视图（v1.1）。
 

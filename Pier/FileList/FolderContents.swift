@@ -46,6 +46,15 @@ final class FolderContents: NSObject {
 
     var onChange: ((Change) -> Void)?
 
+    /// 和 Finder 一样默认隐藏以 "." 开头的项目（如 macOS 写到 SD 卡上的 ._ 文件），⌘⇧. 切换
+    static let hiddenFilesKey = "ShowHiddenFiles"
+    static let hiddenFilesDidChange = Notification.Name("work.xiaolin.Pier.hiddenFilesDidChange")
+    static var showsHiddenFiles: Bool { UserDefaults.standard.bool(forKey: hiddenFilesKey) }
+
+    private func visible(_ nodes: [FileNode]) -> [FileNode] {
+        Self.showsHiddenFiles ? nodes : nodes.filter { !$0.name.hasPrefix(".") }
+    }
+
     private(set) var location: BrowserLocation?
     private(set) var device: MTPDevice?
     var session: MTPSession? { device?.session }
@@ -79,6 +88,12 @@ final class FolderContents: NSObject {
         center.addObserver(self, selector: #selector(objectsAdded(_:)), name: ModelEvents.objectsAdded, object: nil)
         center.addObserver(self, selector: #selector(objectsRemoved(_:)), name: ModelEvents.objectsRemoved, object: nil)
         center.addObserver(self, selector: #selector(objectChanged(_:)), name: ModelEvents.objectChanged, object: nil)
+        center.addObserver(self, selector: #selector(hiddenFilesDidChange(_:)), name: Self.hiddenFilesDidChange, object: nil)
+    }
+
+    /// 展开的子文件夹里已经按旧设置过滤过，重新读一遍最省事
+    @objc private func hiddenFilesDidChange(_ note: Notification) {
+        if searchQuery == nil { reload() } else { refresh() }
     }
 
     @objc private func deviceEvent(_ note: Notification) {
@@ -177,7 +192,7 @@ final class FolderContents: NSObject {
             let listed = (try? await session.children(storage: location.storageID, parent: handle, priority: .interactive)) ?? []
             let objects = MoveLedger.apply(listed, folder: handle, deviceID: location.deviceID, final: true)
             guard let self, let node, !Task.isCancelled else { return }
-            node.children = self.sorted(objects.map { FileNode($0, in: node.path, parent: node) })
+            node.children = self.sorted(self.visible(objects.map { FileNode($0, in: node.path, parent: node) }))
             node.loadTask = nil
             self.onChange?(.children(node))
         }
@@ -232,7 +247,7 @@ final class FolderContents: NSObject {
     // MARK: 排序与过滤
 
     func refresh() {
-        var nodes = rootNodes
+        var nodes = visible(rootNodes)
         if !filterText.isEmpty && searchQuery == nil {
             nodes = nodes.filter { $0.name.localizedCaseInsensitiveContains(filterText) }
         }
@@ -298,6 +313,7 @@ final class FolderContents: NSObject {
     func insert(_ object: MTPObject, in parent: FileNode?) -> FileNode? {
         if let parent {
             guard var children = parent.children else { return nil }   // 还没读过，展开时自然会读到
+            if object.name.hasPrefix(".") && !Self.showsHiddenFiles { return nil }
             if let existing = children.first(where: { $0.name == object.name }) { return existing }
             let node = FileNode(object, in: parent.path, parent: parent)
             children.append(node)

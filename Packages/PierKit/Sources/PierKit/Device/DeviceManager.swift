@@ -119,7 +119,7 @@ public final class DeviceManager: NSObject {
     }
 
     fileprivate func handle(_ event: PTPEvent, from device: MTPDevice) {
-        log.debug("event \(event.description, privacy: .public) from \(device.name, privacy: .public)")
+        log.info("event \(event.description, privacy: .public) from \(device.name, privacy: .public)")
         switch event.code {
         case .storeAdded, .storeRemoved, .storageInfoChanged, .storeFull:
             // 合并短时间内的多个事件

@@ -136,8 +136,8 @@ final class ColumnViewController: NSViewController, FileBrowsingView {
         let target = index + delta
         guard columns.indices.contains(target) else { return }
         let next = columns[target]
-        if delta > 0, next.table.selectedRow < 0, !next.nodes.isEmpty {
-            next.table.selectRowIndexes([0], byExtendingSelection: false)
+        if delta > 0, next.table.selectedRow < 0, let first = next.firstNodeRow {
+            next.table.selectRowIndexes([first], byExtendingSelection: false)
         }
         view.window?.makeFirstResponder(next.table)
         activeColumn = next
@@ -156,6 +156,7 @@ final class ColumnViewController: NSViewController, FileBrowsingView {
     fileprivate func validateDrop(_ info: NSDraggingInfo, onto node: FileNode?) -> NSDragOperation { host?.validateDrop(info, onto: node) ?? [] }
     fileprivate func acceptDrop(_ info: NSDraggingInfo, onto node: FileNode?) -> Bool { host?.acceptDrop(info, onto: node) ?? false }
     fileprivate var isSearching: Bool { contents?.searchQuery != nil }
+    fileprivate func groups(for nodes: [FileNode]) -> [FileGroup] { contents?.groups(for: nodes) ?? [FileGroup(title: "", nodes: nodes)] }
 
     // MARK: FileBrowsingView
 
@@ -194,7 +195,7 @@ final class ColumnViewController: NSViewController, FileBrowsingView {
         if let column = menuColumn, column.table.clickedRow >= 0 {
             let clicked = column.table.clickedRow
             if column.table.selectedRowIndexes.contains(clicked) { return column.selectedNodes }
-            return column.nodes.indices.contains(clicked) ? [column.nodes[clicked]] : []
+            return column.node(atRow: clicked).map { [$0] } ?? []
         }
         return selectedNodes
     }
@@ -202,7 +203,7 @@ final class ColumnViewController: NSViewController, FileBrowsingView {
     func select(_ nodes: [FileNode]) {
         // 选中的节点可能在任何一栏里，从右往左找
         for column in columns.reversed() {
-            let rows = IndexSet(nodes.compactMap { node in column.nodes.firstIndex { $0 === node } })
+            let rows = IndexSet(nodes.compactMap(column.row(of:)))
             guard !rows.isEmpty else { continue }
             column.table.selectRowIndexes(rows, byExtendingSelection: false)
             column.table.scrollRowToVisible(rows.first!)
@@ -224,7 +225,7 @@ final class ColumnViewController: NSViewController, FileBrowsingView {
 
     func screenRect(for node: FileNode) -> NSRect? {
         for column in columns {
-            guard let row = column.nodes.firstIndex(where: { $0 === node }),
+            guard let row = column.row(of: node),
                   let cell = column.table.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
                   let image = cell.imageView, let window = view.window else { continue }
             return window.convertToScreen(image.convert(image.bounds, to: nil))
@@ -239,8 +240,37 @@ final class ColumnViewController: NSViewController, FileBrowsingView {
 private final class BrowserColumn: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     let parent: FileNode?
     let table = ColumnTableView()
-    var nodes: [FileNode] = []
+    /// 这一栏的项目（已排序）；设置时按当前分组规则生成行
+    var nodes: [FileNode] = [] { didSet { rebuildRows() } }
     private unowned let owner: ColumnViewController
+
+    /// 表格的一行：分组标题或项目
+    private enum Row {
+        case header(FileGroup)
+        case node(FileNode)
+    }
+    private var rows: [Row] = []
+
+    private func rebuildRows() {
+        let groups = owner.groups(for: nodes)
+        if groups.count == 1, groups[0].title.isEmpty {
+            rows = nodes.map(Row.node)
+        } else {
+            rows = groups.flatMap { [Row.header($0)] + $0.nodes.map(Row.node) }
+        }
+    }
+
+    func node(atRow row: Int) -> FileNode? {
+        guard rows.indices.contains(row), case let .node(node) = rows[row] else { return nil }
+        return node
+    }
+
+    func row(of node: FileNode) -> Int? {
+        rows.firstIndex { if case let .node(n) = $0 { n === node } else { false } }
+    }
+
+    /// 第一个项目所在的行（跳过分组标题）
+    var firstNodeRow: Int? { rows.firstIndex { if case .node = $0 { true } else { false } } }
 
     init(parent: FileNode?, owner: ColumnViewController) {
         self.parent = parent
@@ -296,13 +326,14 @@ private final class BrowserColumn: NSView, NSTableViewDataSource, NSTableViewDel
     required init?(coder: NSCoder) { fatalError() }
 
     var selectedNodes: [FileNode] {
-        table.selectedRowIndexes.compactMap { nodes.indices.contains($0) ? nodes[$0] : nil }
+        table.selectedRowIndexes.compactMap(node(atRow:))
     }
 
     func reload() {
-        let selected = Set(selectedNodes.map(ObjectIdentifier.init))
+        let selected = selectedNodes
+        rebuildRows()   // 分组方式可能变了
         table.reloadData()
-        let rows = IndexSet(nodes.enumerated().filter { selected.contains(ObjectIdentifier($0.element)) }.map(\.offset))
+        let rows = IndexSet(selected.compactMap(row(of:)))
         // 恢复选择时不要触发展开 / 收起
         suppressSelectionCallback = true
         table.selectRowIndexes(rows, byExtendingSelection: false)
@@ -312,8 +343,8 @@ private final class BrowserColumn: NSView, NSTableViewDataSource, NSTableViewDel
     private var suppressSelectionCallback = false
 
     @objc private func doubleClicked(_ sender: Any?) {
-        guard nodes.indices.contains(table.clickedRow) else { return }
-        owner.open(nodes[table.clickedRow])
+        guard let node = node(atRow: table.clickedRow) else { return }
+        owner.open(node)
     }
 
     fileprivate func becameActive() { owner.columnDidBecomeActive(self) }
@@ -321,11 +352,23 @@ private final class BrowserColumn: NSView, NSTableViewDataSource, NSTableViewDel
 
     // MARK: 数据
 
-    func numberOfRows(in tableView: NSTableView) -> Int { nodes.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        if case .header = rows[row] { return true }
+        return false
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { node(atRow: row) != nil }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if case let .header(group) = rows[row] {
+            let cell = (tableView.makeView(withIdentifier: GroupHeaderCell.identifier, owner: nil) as? GroupHeaderCell) ?? GroupHeaderCell()
+            cell.configure(title: group.title, count: group.nodes.count)
+            return cell
+        }
         let cell = (tableView.makeView(withIdentifier: ColumnCell.identifier, owner: nil) as? ColumnCell) ?? ColumnCell()
-        let node = nodes[row]
+        guard let node = node(atRow: row) else { return cell }
         cell.textField?.stringValue = node.name
         cell.imageView?.image = node.displayIcon
         cell.showsDisclosure = node.isFolder && !owner.isSearching
@@ -346,13 +389,13 @@ private final class BrowserColumn: NSView, NSTableViewDataSource, NSTableViewDel
     // MARK: 拖放
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        owner.pasteboardWriter(for: nodes[row])
+        node(atRow: row).flatMap(owner.pasteboardWriter(for:))
     }
 
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        if dropOperation == .on, nodes.indices.contains(row), nodes[row].isFolder {
-            return owner.validateDrop(info, onto: nodes[row])
+        if dropOperation == .on, let folder = node(atRow: row), folder.isFolder {
+            return owner.validateDrop(info, onto: folder)
         }
         // 放在空白处或文件上 = 放进这一栏所在的文件夹
         if parent == nil && owner.isSearching { return [] }
@@ -362,7 +405,7 @@ private final class BrowserColumn: NSView, NSTableViewDataSource, NSTableViewDel
 
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
                    dropOperation: NSTableView.DropOperation) -> Bool {
-        let target = row >= 0 && nodes.indices.contains(row) && nodes[row].isFolder ? nodes[row] : parent
+        let target = node(atRow: row).flatMap { $0.isFolder ? $0 : nil } ?? parent
         return owner.acceptDrop(info, onto: target)
     }
 }

@@ -63,6 +63,19 @@ final class FolderContents: NSObject {
 
     private(set) var rootNodes: [FileNode] = []
     private(set) var displayedNodes: [FileNode] = []
+    /// 分组后的结果（不分组时只有一个没有标题的组）。displayedNodes 的顺序与它一致。
+    private(set) var groups: [FileGroup] = []
+
+    var grouping: FileGrouping = .none {
+        didSet { if grouping != oldValue { refresh() } }
+    }
+
+    /// 实际生效的分组：设备不给日期时不能按日期分组
+    var effectiveGrouping: FileGrouping { grouping == .date && !hasDates ? .none : grouping }
+    var isGrouped: Bool { effectiveGrouping != .none }
+
+    /// 给展开的子文件夹、分栏视图的子栏用：同样的规则分组
+    func groups(for nodes: [FileNode]) -> [FileGroup] { Grouper.group(nodes, by: effectiveGrouping) }
     private(set) var isLoading = false
     private(set) var message: String?
     /// 不为 nil 时处于递归搜索模式，rootNodes 是搜索结果
@@ -251,7 +264,8 @@ final class FolderContents: NSObject {
         if !filterText.isEmpty && searchQuery == nil {
             nodes = nodes.filter { $0.name.localizedCaseInsensitiveContains(filterText) }
         }
-        displayedNodes = sorted(nodes)
+        groups = Grouper.group(sorted(nodes), by: effectiveGrouping)
+        displayedNodes = groups.flatMap(\.nodes)
         onChange?(.reload)
     }
 

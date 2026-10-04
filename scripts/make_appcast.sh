@@ -1,6 +1,6 @@
 #!/bin/zsh
 # 为一个版本生成 Sparkle feed：用 EdDSA 私钥（环境变量 SPARKLE_ED_PRIVATE_KEY，
-# 即 `generate_keys -x` 导出的那把，CI secret）签 build/release/Pier-<版本>.zip，
+# 即 `generate_keys -x` 导出的那把；publish.sh 会从钥匙串导出后传进来）签 build/release/Pier-<版本>.zip，
 # 写出只含这一版的 build/release/appcast.xml。SUFeedURL 指向
 # releases/latest/download/appcast.xml，最新的 release 自带自己的 appcast，不用维护历史条目。
 set -euo pipefail

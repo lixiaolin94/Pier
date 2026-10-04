@@ -1,11 +1,11 @@
 #!/bin/zsh
 # 正式包：archive → Developer ID 导出 → 公证 → staple → zip，产物在 build/release/。
-# CI（.github/workflows/release.yml）和本地备用路径共用这个脚本，流程见 docs/RELEASE.md。
+# 由 scripts/publish.sh 调用，流程见 docs/RELEASE.md。
 #
 # 公证凭据二选一：
-#   - CI：ASC_KEY_PATH / ASC_KEY_ID / ASC_ISSUER_ID（App Store Connect API key）
+#   - App Store Connect API key：ASC_KEY_PATH / ASC_KEY_ID / ASC_ISSUER_ID
 #   - 只检查构建、不公证：SKIP_NOTARIZE=1
-#   - 本地：notarytool 钥匙串 profile（NOTARY_PROFILE，默认 inbox-notary，账号级凭据，与 Inbox 共用）
+#   - 默认：notarytool 钥匙串 profile（NOTARY_PROFILE，默认 inbox-notary；这是账号级凭据，与 Inbox 共用）
 #       xcrun notarytool store-credentials inbox-notary \
 #         --apple-id <Apple ID> --team-id YWQ4TY4VR5 --password <App 专用密码>
 set -euo pipefail

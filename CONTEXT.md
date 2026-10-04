@@ -54,7 +54,7 @@
 
 ## 版本与发布（2026-10-03 定）
 - 当前版本 **0.1.1**（基线：完整跑通 MTP 文件管理的基本能力）。每次发版只把最后一位加 1（0.1.2、0.1.3…），只有用户说"这个版本 OK 了"才升前两位。
-- Sparkle 2 自动更新（与 Inbox 共用 EdDSA 密钥）；推送 tag `v<版本>` 后由 GitHub Actions 完成签名、公证和发布；一条命令发版：`scripts/bump_version.sh --push`。
+- Sparkle 2 自动更新（与 Inbox 共用 EdDSA 密钥），安装包放在公开仓库 lixiaolin94/Pier 的 GitHub Release。在本机发版（不用 CI），一条命令：`scripts/bump_version.sh --push`（门禁 → 版本号 → tag → 签名公证 → Sparkle 签名 → 上传）。
 - 规则和门禁见 [docs/RELEASE.md](docs/RELEASE.md)，迭代计划见 [docs/ROADMAP.md](docs/ROADMAP.md)，改动记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 环境

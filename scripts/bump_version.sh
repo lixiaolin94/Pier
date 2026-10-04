@@ -1,6 +1,6 @@
 #!/bin/zsh
 # 切一个新版本：跑发版门禁 → 版本号 +1（只动最后一位）→ CHANGELOG「未发布」改成版本号 → 提交 → 打 tag。
-# 加 --push 会推送 main 和 tag，CI 随即签名、公证、发布（docs/RELEASE.md）。
+# 加 --push 会推送 main 和 tag，然后在本机签名、公证并发布 GitHub Release（scripts/publish.sh，docs/RELEASE.md）。
 #
 #   scripts/bump_version.sh            # 0.1.1 → 0.1.2
 #   scripts/bump_version.sh 0.2.0      # 指定版本：只在用户认可"这个版本 OK 了"时用
@@ -61,7 +61,7 @@ echo "✓ 已提交并打 tag v$TARGET"
 if (( PUSH )); then
   git push origin main
   git push origin "v$TARGET"
-  echo "✓ 已推送，CI 正在发布：https://github.com/lixiaolin94/Pier/actions"
+  scripts/publish.sh
 else
-  echo "推送后由 CI 发布：git push origin main && git push origin v$TARGET"
+  echo "确认无误后：git push origin main && git push origin v$TARGET && scripts/publish.sh"
 fi

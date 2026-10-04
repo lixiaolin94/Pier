@@ -1,8 +1,7 @@
 # 版本与发布
 
-分发方式：Developer ID 签名 + 公证，直接分发（不上 App Store），Sparkle 2 应用内自动更新。
-构建、签名、公证、发布全部由 GitHub Actions 完成（`.github/workflows/release.yml`），
-流程与 Inbox 相同，思路与 Span 的 `release.sh` 一键发布一致。
+分发方式：Developer ID 签名 + 公证，直接分发（不上 App Store），Sparkle 2 应用内自动更新，安装包放在 GitHub Release。
+**在本机发版**（不用 CI）：一条命令完成门禁、版本号、提交、tag、签名、公证、Sparkle 签名和上传，思路与 Span 的 `release.sh` 一键发布一致。
 
 ## 版本号规则
 
@@ -32,10 +31,13 @@ Claude 在完成 ROADMAP 里的一项、满足以上条件后，可以直接发�
 scripts/bump_version.sh --push
 ```
 
-脚本依次：检查工作区干净且在 main → 跑门禁 → 版本号最后一位 +1 → 把 CHANGELOG 的「未发布」改成 `## 0.1.N — 日期` → 提交 `release: 0.1.N` → 打 tag `v0.1.N` → 推送 main 和 tag。
-不加 `--push` 就只在本地提交和打 tag，确认无误后再手动推送。
+依次执行：
+1. `bump_version.sh`：检查工作区干净且在 main → 跑门禁 → 版本号最后一位 +1 → 把 CHANGELOG 的「未发布」改成 `## 0.1.N — 日期` → 提交 `release: 0.1.N` → 打 tag `v0.1.N` → 推送 main 和 tag；
+2. `publish.sh`：`release.sh`（archive → Developer ID 导出 → 签名/版本自检 → 公证 → staple → `Pier-<版本>.zip`）→ 从钥匙串导出 Sparkle 私钥到临时文件 → `make_appcast.sh` 签名并生成 `appcast.xml` → 删掉临时私钥 → `gh release create`（说明取自 CHANGELOG 的这一节）。
 
-推送 tag 后 CI 自动完成：校验 tag 与版本号一致 → 单元测试 → archive → Developer ID 签名导出 → 签名/版本自检 → 公证 → staple → `Pier-<版本>.zip` → Sparkle EdDSA 签名 → `appcast.xml` → GitHub Release（说明取自 CHANGELOG 的这一节）。
+不加 `--push` 就只在本地提交和打 tag，确认无误后再手动执行它最后打印的那条命令。
+公证等步骤失败时，修好原因后单独重跑 `scripts/publish.sh` 即可（它会检查当前提交就是这个 tag，GitHub 上还没有这个 Release）。
+`SKIP_NOTARIZE=1 scripts/release.sh` 可以只检查构建和签名、不公证，这样的包不能发布。
 
 已安装的 Pier 每天自动检查一次 `releases/latest/download/appcast.xml`（永远指向最新的 Release，不用维护历史条目），也可以从 App 菜单 ▸ 检查更新… 手动检查。
 
@@ -43,27 +45,16 @@ scripts/bump_version.sh --push
 
 - Sparkle 不支持降级：发出去有问题的版本，**往前修**，发下一个修订版。
 - 如果一个版本严重到不能留在线上：先把那个 GitHub Release 删掉（`latest` 会回到上一个版本，还没更新的用户不会再收到它），再尽快发修复版。
-- CI 失败（证书、公证等）：修好后删掉远端 tag 重新推送，或者用下面的本地备用路径。
+- `publish.sh` 失败（证书、公证、网络）：修好后重跑 `scripts/publish.sh`，不需要重新切版本。
 
-## 一次性设置
+## 一次性设置（都在这台 Mac 上）
 
-1. **GitHub 仓库** `lixiaolin94/Pier`。必须是公开仓库，或者至少 Release 资源可以匿名下载，因为 Sparkle 下载更新不带登录凭据。
-2. **仓库 secrets**（与 Inbox 相同的值）：
-   - `SPARKLE_ED_PRIVATE_KEY`：Sparkle EdDSA 私钥。Pier 与 Inbox 共用一把（Sparkle 官方建议一个开发者用一把），私钥在登录钥匙串里，公钥已经写在 `project.yml` 的 `SUPublicEDKey` 中。导出：
-     ```bash
-     build/sparkle-tools/bin/generate_keys -x /tmp/sparkle_ed_key && gh secret set SPARKLE_ED_PRIVATE_KEY -R lixiaolin94/Pier < /tmp/sparkle_ed_key && rm /tmp/sparkle_ed_key
-     ```
-   - `MAC_CERT_P12` / `MAC_CERT_PASSWORD`：经典 Developer ID Application 证书（.p12 的 base64 和密码）。证书 2027-02 到期，到期后要重建证书、重新导出 .p12、更新这两个 secret（Inbox 也要同步更新）。
-   - `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_P8`：App Store Connect API key（Admin），用于公证。
-3. **第一次安装要手动装**：0.1.1 是第一个带 Sparkle 的版本，要从 GitHub Release 下载后拖进「应用程序」。之后全部走应用内更新。
-
-## 本地备用路径
-
-CI 不可用时（需要登录钥匙串里有 Developer ID 证书，以及 notarytool 的钥匙串 profile `inbox-notary`）：
-
-```bash
-scripts/release.sh
-build/sparkle-tools/bin/generate_keys -x /tmp/sparkle_ed_key
-SPARKLE_ED_PRIVATE_KEY="$(cat /tmp/sparkle_ed_key)" scripts/make_appcast.sh && rm /tmp/sparkle_ed_key
-gh release create v<版本> build/release/Pier-*.zip build/release/appcast.xml --notes-file <说明>
-```
+1. **GitHub 仓库** `lixiaolin94/Pier`（公开，已建好）。必须能匿名下载 Release 资源，因为 Sparkle 下载更新不带登录凭据。`gh` 要已登录。
+2. **Developer ID Application 证书**：已在登录钥匙串里（Xcode 装的）。证书 2027-02 到期，到期后在 Xcode ▸ Settings ▸ Accounts 里重建。
+3. **Sparkle EdDSA 私钥**：已在登录钥匙串里，Pier 与 Inbox 共用一把（Sparkle 官方建议一个开发者用一把）；公钥写在 `project.yml` 的 `SUPublicEDKey` 中。私钥丢了，老用户就没法自动升级，备份在密码 App 里。
+4. **公证凭据**（只需执行一次，需要 Apple ID 和一个 App 专用密码，在 account.apple.com ▸ 登录与安全 ▸ App 专用密码里生成）：
+   ```bash
+   xcrun notarytool store-credentials inbox-notary --apple-id <Apple ID> --team-id YWQ4TY4VR5
+   ```
+   这是账号级凭据，Inbox 的本地发版也用这个名字。
+5. **第一次安装要手动装**：0.1.1 是第一个带 Sparkle 的版本，要从 GitHub Release 下载后拖进「应用程序」。之后全部走应用内更新。

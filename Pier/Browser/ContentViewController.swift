@@ -199,6 +199,7 @@ final class ContentViewController: NSViewController {
         if changed {
             let mode = ViewPreferences.mode(for: location?.stored)
             if mode != viewMode { install(mode) }
+            contents.grouping = ViewPreferences.grouping(for: location?.stored)
         }
         if changed || forceReload { contents.load(hasLocation ? location : nil) }
         updatePath()
@@ -554,6 +555,14 @@ extension ContentViewController: BrowserActions, NSMenuItemValidation {
         Task { await FileOperations.upload(urls, to: location, knownSiblings: siblings, window: view.window) }
     }
 
+    /// 群组方式（菜单项的 tag 是 FileGrouping.allCases 的下标）
+    @objc func groupBy(_ sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag, FileGrouping.allCases.indices.contains(tag) else { return }
+        let grouping = FileGrouping.allCases[tag]
+        contents.grouping = grouping
+        ViewPreferences.set(grouping, for: location?.stored)
+    }
+
     @objc func toggleHiddenFiles(_ sender: Any?) {
         UserDefaults.standard.set(!FolderContents.showsHiddenFiles, forKey: FolderContents.hiddenFilesKey)
         NotificationCenter.default.post(name: FolderContents.hiddenFilesDidChange, object: nil)
@@ -592,6 +601,12 @@ extension ContentViewController: BrowserActions, NSMenuItemValidation {
             let pasteboard = NSPasteboard.general
             return isWritable && !searching && (pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
                                                 || pasteboard.availableType(from: [.pierItem]) != nil)
+        case #selector(groupBy(_:)):
+            let grouping = FileGrouping.allCases.indices.contains(item.tag) ? FileGrouping.allCases[item.tag] : .none
+            item.state = contents.grouping == grouping ? .on : .off
+            // 画廊视图和 Finder 一样不分组；设备不给日期时不能按日期分组
+            guard location?.resolved != nil, viewMode != .gallery else { return false }
+            return grouping != .date || contents.hasDates
         case #selector(toggleHiddenFiles(_:)):
             item.state = FolderContents.showsHiddenFiles ? .on : .off
             return true
@@ -736,6 +751,20 @@ final class PathBarControl: NSPathControl {
 enum ViewPreferences {
     private static let key = "FolderViewModes"
     private static let defaultKey = "DefaultViewMode"
+    private static let groupingKey = "FolderGroupings"
+
+    /// 每个文件夹的群组方式；没设置过就不分组
+    static func grouping(for location: StoredLocation?) -> FileGrouping {
+        guard let location, let raw = (UserDefaults.standard.dictionary(forKey: groupingKey) as? [String: String])?[location.key] else { return .none }
+        return FileGrouping(rawValue: raw) ?? .none
+    }
+
+    static func set(_ grouping: FileGrouping, for location: StoredLocation?) {
+        guard let location else { return }
+        var all = (UserDefaults.standard.dictionary(forKey: groupingKey) as? [String: String]) ?? [:]
+        all[location.key] = grouping == .none ? nil : grouping.rawValue
+        UserDefaults.standard.set(all, forKey: groupingKey)
+    }
 
     static func mode(for location: StoredLocation?) -> ContentViewController.ViewMode {
         let defaults = UserDefaults.standard

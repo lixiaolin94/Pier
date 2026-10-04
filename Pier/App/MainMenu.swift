@@ -99,6 +99,10 @@ enum MainMenu {
         m.addItem(item(String(localized: "分栏"), #selector(BrowserActions.showAsColumns(_:)), "3"))
         m.addItem(item(String(localized: "画廊"), #selector(BrowserActions.showAsGallery(_:)), "4"))
         m.addItem(.separator())
+        let grouping = item(String(localized: "群组方式"), nil)
+        grouping.submenu = groupingMenu(withShortcuts: true)
+        m.addItem(grouping)
+        m.addItem(.separator())
         m.addItem(item(String(localized: "显示隐藏文件"), #selector(BrowserActions.toggleHiddenFiles(_:)), ".", [.command, .shift]))
         m.addItem(.separator())
         m.addItem(item(String(localized: "显示标签页栏"), #selector(NSWindow.toggleTabBar(_:)), "t", [.command, .shift]))
@@ -110,6 +114,20 @@ enum MainMenu {
         m.addItem(.separator())
         m.addItem(item(String(localized: "自定工具栏…"), #selector(NSWindow.runToolbarCustomizationPalette(_:))))
         m.addItem(item(String(localized: "进入全屏幕"), #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
+        return m
+    }
+
+    /// 群组方式菜单（显示菜单和工具栏的「群组」按钮共用）。tag 是 FileGrouping.allCases 的下标。
+    static func groupingMenu(withShortcuts: Bool) -> NSMenu {
+        let m = NSMenu(title: String(localized: "群组方式"))
+        for (index, grouping) in FileGrouping.allCases.enumerated() {
+            let entry = withShortcuts
+                ? item(grouping.title, #selector(BrowserActions.groupBy(_:)), grouping.keyEquivalent, [.command, .control])
+                : item(grouping.title, #selector(BrowserActions.groupBy(_:)))
+            entry.tag = index
+            m.addItem(entry)
+            if grouping == .none { m.addItem(.separator()) }
+        }
         return m
     }
 
@@ -155,6 +173,7 @@ enum MainMenu {
     @objc optional func showAsList(_ sender: Any?)
     @objc optional func showAsColumns(_ sender: Any?)
     @objc optional func toggleHiddenFiles(_ sender: Any?)
+    @objc optional func groupBy(_ sender: Any?)
     @objc optional func showAsGallery(_ sender: Any?)
     @objc optional func togglePathBar(_ sender: Any?)
     @objc optional func toggleStatusBar(_ sender: Any?)

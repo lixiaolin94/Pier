@@ -222,6 +222,7 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
 
     // 焦点在侧边栏时，文件动作也要能用：转给内容区
     @objc func toggleHiddenFiles(_ sender: Any?) { content.toggleHiddenFiles(sender) }
+    @objc func groupBy(_ sender: Any?) { content.groupBy(sender) }
     @objc func showAsIcons(_ sender: Any?) { content.showAsIcons(sender) }
     @objc func showAsList(_ sender: Any?) { content.showAsList(sender) }
     @objc func showAsColumns(_ sender: Any?) { content.showAsColumns(sender) }
@@ -265,7 +266,7 @@ extension BrowserWindowController: BrowserActions, NSMenuItemValidation, NSToolb
         case #selector(toggleStatusBar(_:)):
             item.title = content.isStatusBarVisible ? String(localized: "隐藏状态栏") : String(localized: "显示状态栏")
             return true
-        case #selector(toggleHiddenFiles(_:)), #selector(showAsIcons(_:)), #selector(showAsList(_:)), #selector(showAsColumns(_:)), #selector(showAsGallery(_:)), #selector(newFolder(_:)), #selector(openSelection(_:)),
+        case #selector(groupBy(_:)), #selector(toggleHiddenFiles(_:)), #selector(showAsIcons(_:)), #selector(showAsList(_:)), #selector(showAsColumns(_:)), #selector(showAsGallery(_:)), #selector(newFolder(_:)), #selector(openSelection(_:)),
              #selector(openSelectionInNewTab(_:)), #selector(getInfo(_:)), #selector(downloadSelection(_:)), #selector(upload(_:)),
              #selector(deleteSelection(_:)), #selector(renameSelection(_:)), #selector(quickLook(_:)),
              #selector(showEnclosingFolder(_:)):
@@ -297,6 +298,7 @@ private extension NSToolbarItem.Identifier {
     static let forward = Self("forward")
     static let viewMode = Self("viewMode")
     static let reload = Self("reload")
+    static let grouping = Self("grouping")
     static let actions = Self("actions")
     static let transfers = Self("transfers")
     static let search = Self("search")
@@ -304,11 +306,11 @@ private extension NSToolbarItem.Identifier {
 
 extension BrowserWindowController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .flexibleSpace, .viewMode, .reload, .actions, .transfers, .search]
+        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .flexibleSpace, .viewMode, .grouping, .reload, .actions, .transfers, .search]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .viewMode, .reload, .actions, .transfers, .search, .flexibleSpace, .space]
+        [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .viewMode, .grouping, .reload, .actions, .transfers, .search, .flexibleSpace, .space]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -334,6 +336,14 @@ extension BrowserWindowController: NSToolbarDelegate {
             return group
         case .reload:
             return button(id, symbol: "arrow.clockwise", label: String(localized: "刷新"), action: #selector(reload(_:)))
+        case .grouping:
+            // 和 Finder 一样带下拉箭头
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.image = NSImage(systemSymbolName: "square.grid.3x1.below.line.grid.1x2", accessibilityDescription: String(localized: "群组"))
+            item.label = String(localized: "群组")
+            item.toolTip = String(localized: "更改项目的分组方式")
+            item.menu = MainMenu.groupingMenu(withShortcuts: false)
+            return item
         case .actions:
             let item = NSMenuToolbarItem(itemIdentifier: id)
             item.image = symbol("ellipsis.circle")

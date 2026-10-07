@@ -462,6 +462,7 @@ public final class TransferQueue {
                     listings[handle] = []
                 }
             } else {
+                if installs && entry.size > UInt64(session.maxOutDataLength) { throw TransferError.tooLargeForInstall(entry.size) }
                 if let existing, !existing.isFolder { try await session.delete(existing.handle) }
                 t.progress.setCurrent(name)
                 let source = entry.path.dropFirst().reduce(t.localURL) { $0.appendingPathComponent($1) }

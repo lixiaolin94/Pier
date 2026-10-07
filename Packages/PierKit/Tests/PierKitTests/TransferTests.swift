@@ -104,6 +104,22 @@ private func tempDir() throws -> URL {
     #expect(device.ops().filter { $0 == .deleteObject }.count == before)
 }
 
+@Test func dbiChunkedUploadDeclaresFullSizeAndIsNotTruncated() async throws {
+    let device = FakeDevice(maxOutDataLength: 10_000)
+    device.truncateAt = 10_000   // FAT32：只声明首块大小时，超出部分会被丢弃
+    let session = try makeSession(device, manufacturer: "Nintendo")
+    let file = try tempDir().appendingPathComponent("big.nsz")
+    try Data.pattern(25_000).write(to: file)
+
+    let h = try await session.upload(file: file, name: "big.nsz", storage: FakeDevice.storage, parent: PTPHandle.root,
+                                     progress: TransferProgress(), preferChunked: true)
+    #expect(h != 0)
+    #expect(device.find(["big.nsz"])?.data == .pattern(25_000))
+    #expect(device.ops().contains(.sendObjectPropList))
+    #expect(!device.ops().contains(.sendObject))
+    #expect(!device.ops().contains(.sendObjectInfo))
+}
+
 @Test func silentTruncationIsDetectedAndCleanedUp() async throws {
     let device = FakeDevice()
     device.truncateAt = 10_000   // 模拟 FAT32 静默截断

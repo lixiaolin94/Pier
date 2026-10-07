@@ -11,6 +11,8 @@ final class FakeDevice: PTPTransport, @unchecked Sendable {
         var name: String
         var isFolder: Bool
         var data = Data()
+        /// SendObjectPropList 声明了超过 truncateAt 的大小：DBI 会拆分存储，不截断
+        var split = false
     }
 
     static let storage: UInt32 = 0x0001_0001
@@ -120,6 +122,21 @@ final class FakeDevice: PTPTransport, @unchecked Sendable {
             objects[h]?.data = consumesUploads ? Data() : truncate(data)
             return ok()
 
+        case .sendObjectPropList:
+            // 只认一个元素：ObjectFileName
+            guard let out else { return fail(.invalidParameter) }
+            var r = PTPDataReader(out)
+            guard (try? r.u32()) == 1, (try? r.u32()) == 0, (try? r.u16()) == MTPObjectProperty.objectFileName.rawValue,
+                  (try? r.u16()) == 0xFFFF, let name = try? r.string() else { return fail(.invalidParameter) }
+            let parent = p[1] == PTPHandle.root ? 0 : p[1]
+            if objects.contains(where: { $0.value.parent == parent && $0.value.name == name }) { return fail(.generalError) }
+            let declared = Int(UInt64(p[3]) << 32 | UInt64(p[4]))
+            nextHandle += 1
+            objects[nextHandle] = Object(storage: p[0], parent: parent, name: name, isFolder: false,
+                                         split: truncateAt.map { declared > $0 } ?? false)
+            declaredSizes.append(UInt32(clamping: declared))
+            return ok([p[0], p[1], nextHandle])
+
         case .beginEditObject, .endEditObject:
             return objects[p[0]] == nil ? fail(.invalidObjectHandle) : ok()
 
@@ -128,7 +145,7 @@ final class FakeDevice: PTPTransport, @unchecked Sendable {
             let offset = Int(UInt64(p[1]) | UInt64(p[2]) << 32)
             if o.data.count < offset { o.data.append(Data(count: offset - o.data.count)) }
             o.data.replaceSubrange(offset..<min(offset + out.count, o.data.count), with: out)
-            o.data = truncate(o.data)
+            if !o.split { o.data = truncate(o.data) }
             objects[p[0]] = o
             return ok()
 
@@ -168,7 +185,7 @@ final class FakeDevice: PTPTransport, @unchecked Sendable {
     static let allOperations: [PTPOperation] = [
         .getDeviceInfo, .getStorageIDs, .getStorageInfo, .getObjectHandles, .getObjectInfo, .getObject, .deleteObject,
         .sendObjectInfo, .sendObject, .moveObject, .getPartialObject, .getPartialObject64, .sendPartialObject,
-        .truncateObject, .beginEditObject, .endEditObject, .getObjectPropsSupported, .getObjectPropValue, .setObjectPropValue,
+        .truncateObject, .beginEditObject, .endEditObject, .getObjectPropsSupported, .getObjectPropValue, .setObjectPropValue, .sendObjectPropList,
     ]
 
     static func deviceInfo(operations: [PTPOperation] = allOperations, manufacturer: String = "Google") throws -> PTPDeviceInfo {

@@ -33,6 +33,9 @@ public struct DeviceQuirks: Sendable, Hashable {
     public var zeroByteFilesNeedOnlyObjectInfo: Bool
     /// 删除文件夹会递归删除其中所有内容（MTP 设备普遍如此）
     public var deletesFoldersRecursively: Bool
+    /// 分段上传时先用 SendObjectPropList 声明完整的 64 位大小，再从 0 开始 SendPartialObject，不发首块 SendObject。
+    /// DBI：只声明首块大小时按小文件建，FAT32 卡上超过 4 GB 的部分被静默丢弃；声明完整大小后会拆分存储，7.7 GB 实测逐段一致。
+    public var chunkedUploadDeclaresFullSize: Bool
 
     public init(deviceInfo info: PTPDeviceInfo) {
         isDBI = info.manufacturer.localizedCaseInsensitiveContains("Nintendo")
@@ -51,9 +54,12 @@ public struct DeviceQuirks: Sendable, Hashable {
         freeSpaceIsCached = isDBI
         zeroByteFilesNeedOnlyObjectInfo = isDBI
         deletesFoldersRecursively = true
+        chunkedUploadDeclaresFullSize = isDBI && info.supports(.sendObjectPropList)
     }
 
-    /// DBI 的安装存储（SD Card install / NAND install）：写进去的 NSP 会被安装。这里还没验证过分段写，只走单次 SendObject。
+    /// DBI 的安装存储（SD Card install / NAND install）：写进去的 NSP 会被安装。
+    /// 只能用一条 SendObject 发完整个文件：BeginEdit 返回 0x200E、SendPartialObject 返回 0x2005，
+    /// SendObject 带的数据少于声明的大小返回 0x2002。所以超过单条指令上限（约 4 GB）的文件装不进去。
     public func isInstallTarget(_ storage: MTPStorage) -> Bool {
         isDBI && storage.displayName.localizedCaseInsensitiveContains("install")
     }

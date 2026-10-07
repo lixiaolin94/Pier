@@ -39,6 +39,8 @@ public enum TransferError: Error, LocalizedError, Sendable {
     case insufficientSpace(needed: UInt64, available: UInt64)
     /// 设备未连接
     case deviceUnavailable
+    /// 往 DBI 安装存储写超过单条指令上限的文件：安装存储不接受分段写
+    case tooLargeForInstall(UInt64)
 
     public var errorDescription: String? {
         let bytes = { (n: UInt64) in ByteCountFormatter.string(fromByteCount: Int64(clamping: n), countStyle: .file) }
@@ -51,6 +53,8 @@ public enum TransferError: Error, LocalizedError, Sendable {
                 s += String(localized: "这个存储可能是 FAT32 格式，单个文件不能超过 4 GB。")
             }
             return s
+        case let .tooLargeForInstall(n):
+            return String(localized: "文件太大（\(bytes(n))）：DBI 的安装存储一次只能接收 4 GB 以内的文件。请把它传到 SD 卡，再在 DBI 里从 SD 卡安装。")
         case .cannotReadBeyond4GB:
             return String(localized: "这台设备不支持读取超过 4 GB 的文件。")
         case let .notFound(name):
@@ -200,6 +204,10 @@ extension MTPSession {
                                progress: TransferProgress, priority: RequestPriority) async throws -> UInt32 {
         let fh = try FileHandle(forReadingFrom: url)
         defer { try? fh.close() }
+        if quirks.chunkedUploadDeclaresFullSize {
+            return try await uploadDeclaringFullSize(fh, size: size, name: name, storage: storage, parent: parent,
+                                                     progress: progress, priority: priority)
+        }
         let firstLength = Int(min(UInt64(tuning.uploadChunk), size))
         let first = try fh.read(upToCount: firstLength) ?? Data()
         guard first.count == firstLength else { throw TransferError.localFileChanged(name) }
@@ -218,9 +226,35 @@ extension MTPSession {
         }
         progress.addBytes(UInt64(first.count))
 
+        return try await sendPartials(fh, from: UInt64(first.count), size: size, handle: handle, name: name,
+                                      progress: progress, priority: priority)
+    }
+
+    /// DBI：SendObjectPropList 声明完整的 64 位大小建对象，然后全部用 SendPartialObject 从 0 写
+    private func uploadDeclaringFullSize(_ fh: FileHandle, size: UInt64, name: String, storage: UInt32, parent: UInt32,
+                                         progress: TransferProgress, priority: RequestPriority) async throws -> UInt32 {
+        var w = PTPDataWriter()
+        w.u32(1)                                                // 元素个数
+        w.u32(0)                                                // ObjectHandle（新对象填 0）
+        w.u16(MTPObjectProperty.objectFileName.rawValue)
+        w.u16(0xFFFF)                                           // 数据类型：字符串
+        w.string(name)
+        let props = w.data
+        let resp = try await send(PTPCommand(.sendObjectPropList, [storage, parent, UInt32(PTPObjectFormat.undefined.rawValue),
+                                                                   UInt32(size >> 32), UInt32(size & 0xFFFF_FFFF)]),
+                                  outData: props, priority: priority)
+        guard resp.parameters.count >= 3 else { throw PTPError.malformedData("SendObjectPropList 响应缺少新对象句柄") }
+        return try await sendPartials(fh, from: 0, size: size, handle: resp.parameters[2], name: name,
+                                      progress: progress, priority: priority)
+    }
+
+    /// BeginEdit + SendPartialObject × N + EndEdit。失败或取消时删掉这个对象。
+    private func sendPartials(_ fh: FileHandle, from start: UInt64, size: UInt64, handle: UInt32, name: String,
+                              progress: TransferProgress, priority: RequestPriority) async throws -> UInt32 {
         var editing = false
         do {
-            var offset = UInt64(first.count)
+            try fh.seek(toOffset: start)
+            var offset = start
             if offset < size {
                 try await send(PTPCommand(.beginEditObject, [handle]), priority: priority)
                 editing = true

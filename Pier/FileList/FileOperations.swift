@@ -131,6 +131,19 @@ enum FileOperations {
             }
         }
         let quirks = session.quirks
+        var urls = urls
+        if quirks.isInstallTarget(storage) {
+            let limit = UInt64(session.maxOutDataLength)
+            let tooLarge = urls.filter { fileSize($0) > limit }
+            if !tooLarge.isEmpty {
+                guard let redirect = askRedirectToSDCard(tooLarge, device: device, remaining: urls.count - tooLarge.count) else { return }
+                urls.removeAll { tooLarge.contains($0) }
+                if let sd = redirect {
+                    await upload(tooLarge, to: BrowserLocation(deviceID: location.deviceID, storageID: sd.id), window: window)
+                }
+                if urls.isEmpty { return }
+            }
+        }
         let destination = location.title
         var remembered: ConflictChoice?
         var plans: [(URL, String, Bool)] = []
@@ -164,16 +177,6 @@ enum FileOperations {
             plans.append((url, name, replace))
         }
 
-        if quirks.isInstallTarget(storage), plans.contains(where: { fileSize($0.0) > UInt64(session.maxOutDataLength) }) {
-            // 安装存储上的分段写还没验证过，提前提醒
-            let alert = NSAlert()
-            alert.messageText = String(localized: "有超过 4 GB 的文件")
-            alert.informativeText = String(localized: "往 DBI 的安装存储写入超过 4 GB 的文件需要分段写入，DBI 是否支持还没有验证。如果安装失败，请改用 DBI 的其他安装方式。")
-            alert.addButton(withTitle: String(localized: "继续上传"))
-            alert.addButton(withTitle: String(localized: "取消"))
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-
         for (url, name, replace) in plans {
             let t = Services.transfers.upload(url, to: location.path, storageID: location.storageID, deviceID: device.persistentID,
                                               deviceName: device.name, as: name, replaceExisting: replace)
@@ -183,6 +186,34 @@ enum FileOperations {
                 ModelEvents.added([object], on: deviceID)
             }
         }
+    }
+
+    /// 往 DBI 安装存储放超过 4 GB 的文件：安装存储只收一条指令发完的整个文件，而 macOS 每条指令最多约 4 GB。
+    /// 提议改传到 SD 卡，传完在 DBI 里「浏览 SD 卡」安装。返回 nil 表示取消整个上传；.some(nil) 表示跳过这些文件。
+    private static func askRedirectToSDCard(_ files: [URL], device: MTPDevice, remaining: Int) -> MTPStorage?? {
+        let quirks = device.session?.quirks
+        let sd = device.storages.first {
+            !$0.isReadOnly && !(quirks?.isInstallTarget($0) ?? false) && $0.displayName.localizedCaseInsensitiveContains("SD Card")
+        }
+        let alert = NSAlert()
+        alert.messageText = files.count == 1
+            ? String(localized: "“\(files[0].lastPathComponent)”超过 4 GB，不能直接装")
+            : String(localized: "有 \(files.count) 个文件超过 4 GB，不能直接装")
+        var info = String(localized: "DBI 的安装存储要求一次收完整个文件，而 macOS 每次最多只能传 4 GB。")
+        if let sd {
+            info += String(localized: "可以先传到“\(sd.displayName)”的根目录，传完后在 DBI 里选「浏览 SD 卡」找到它安装，装好后可以删掉。")
+            alert.addButton(withTitle: String(localized: "传到 SD 卡"))
+        }
+        alert.informativeText = info
+        if remaining > 0 { alert.addButton(withTitle: String(localized: "跳过这些文件")) }
+        alert.addButton(withTitle: String(localized: "取消"))
+        let response = alert.runModal()
+        let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        var choices: [MTPStorage??] = []
+        if let sd { choices.append(.some(sd)) }
+        if remaining > 0 { choices.append(.some(nil)) }
+        choices.append(nil)
+        return index >= 0 && index < choices.count ? choices[index] : nil
     }
 
     private static func fileSize(_ url: URL) -> UInt64 {

@@ -170,7 +170,7 @@ GetObjectPropsSupported(0x3000) = `DC41 PersistentUID, DC01 StorageID, DC0B Pare
 
 ### 关键限制与 DBI 怪癖（正式开发必须处理）
 1. **ICC 单条指令的 outData ≤ 4 GB−1**：ImageCaptureCore 把 NSData 内联进 XPC 消息，`_xpc_data_serialize` 遇到 ≥ 2^32 字节就 `_xpc_api_misuse` 触发 **SIGTRAP 崩溃（无法 catch）**。本地用匿名 XPC 连接复现：4294967295 能过，4294967296 崩溃。再算上 PTP container 头的 12 字节，单次 SendObject 的实际上限是 4294967283 字节（已实测成功）。崩溃栈：`-[PTPCameraDeviceManager sendDevicePTPCommandImp:]` → `NSXPCConnection` → `_xpc_data_serialize` → `_xpc_api_misuse`。正式代码必须在发送前检查大小。
-2. **超过 4 GB 的上传只能分段**：SendObjectInfo + 首块 SendObject + BeginEditObject + SendPartialObject(64 位偏移) + EndEditObject。在 SD 卡普通目录验证可行（64 位偏移参数被正确处理，没有回绕）。**但 DBI 的安装存储（5/6）是否接受分段写还没验证**（按要求没往安装目录写）。这是方案 A 剩下的唯一大风险，见「下一步」。
+2. **超过 4 GB 的上传只能分段**：SendObjectInfo + 首块 SendObject + BeginEditObject + SendPartialObject(64 位偏移) + EndEditObject。在 SD 卡普通目录验证可行（64 位偏移参数被正确处理，没有回绕）。DBI 安装存储不接受分段写，见下面「>4 GB 文件（2026-10-08 实测）」。
 3. **SD 卡单文件写到约 4 GB 被截断，而且 DBI 不报错**：4.6 GB 分段写时，所有指令都返回 0x2001，但最终 ObjectSize = 4291821556，4 GB 以后的数据全部丢失（4 GB 之前的数据逐段校验一致）。基本可以确定这张 SD 卡是 **FAT32**（单文件上限 4 GB−1），DBI 写入失败时不返回错误。正式实现：**写完必须回读 ObjectSize 校验**；往 SD 普通目录写 >4 GB 文件前应提示（StorageInfo 的 FilesystemType 统一是 2，判断不出 FAT32/exFAT）。
 4. **SendObjectInfo 之后如果没有 SendObject，会留下 0 字节的空文件**（4 次崩溃测试各留下一个）。
 5. **重复 handle**：通过 SendObjectInfo 新建的对象，在 DBI 第一次扫描该目录时会再被登记一次（同名文件出现新旧两个 handle，之后不再增长）。正式实现需要按 (parent, name) 去重，或者上传后重新枚举目录。handle 只在 DBI 的这次 MTP 会话内有效；ptpcamerad 会一直保持 PTP 会话，所以多次运行本工具时 handle 是连续的。
@@ -223,3 +223,16 @@ GetObjectPropsSupported(0x3000) = `DC41 PersistentUID, DC01 StorageID, DC0B Pare
 9. SetObjectPropValue 虽然不在 GetObjectPropsSupported 里，但 0xDC07 可以写；GetObjectPropDesc(0xDC07) 返回 0xA80A，GetObjectPropDesc(0xDC44) 显示可写。
 
 **总体判断**：MTP 读写本身很稳（数据零错误，没有挂起）。问题都集中在 DBI 的名字处理和目录缓存上，这些和走方案 A 还是方案 B 无关。正式 app 需要在本地维护目录模型，并做文件名预检。**仍然建议方案 A。**
+
+### >4 GB 文件（2026-10-08 实测，`ptpspike install / pwrite / cmp`，DBI 22.5.0 固件，7.7 GB NSZ）
+**安装存储（`5: SD Card install`）装不了超过单条指令上限的文件**：
+- SendObjectPropList(0x9808，参数里带 64 位 ObjectSize，属性只给 ObjectFileName 0xDC07) 成功，列表里显示真实大小 7740651661。
+- 之后 BeginEditObject 返回 **0x200E**（Store_Read_Only）；不 BeginEdit 直接 SendPartialObject 返回 **0x2005**（Operation_Not_Supported），而且等了约 2 分钟才返回。
+- SendObjectPropList(7.7 GB) + SendObject 只带 32 MB → **0x2002**：DBI 要求一个数据阶段发完声明的全部大小。
+- 失败一次后 DBI 的安装流程卡住：之后所有 SendObjectInfo / SendObjectPropList 都返回 0x2002，**要在 DBI 里退出再进入 MTP 才恢复**。
+- 结论：走 ImageCaptureCore（单条指令 ≤ 4 GB−13）装不了 >4 GB 的游戏。Pier 的做法：提前拦截，提议改传到 SD 卡，再在 DBI 里「浏览 SD 卡」安装。
+
+**SD 卡（`1: SD Card`，FAT32）可以存 >4 GB 文件，前提是一开始就声明完整大小**：
+- 旧做法（SendObjectInfo 只声明首块 32 MB + SendObject 首块 + 分段）：全部 0x2001，但 ObjectSize = 4291821556，4 GB 后的数据被静默丢弃（和 2026-10-03 的结果一样）。
+- 新做法（SendObjectPropList 声明 7740651661 → BeginEdit → SendPartialObject 从偏移 0 写完 → EndEdit，不发 SendObject）：ObjectSize = 7740651661，在 0 / 2048 / 4094 / 4095 / 4096 / 4097 / 6000 / 7380 MB 处各取 1 MB 比对，全部一致。写速 31–33 MB/s。DBI 在 FAT32 上应该是按说明自动拆成归档文件夹存的。
+- Pier 已改为：DBI 的分段上传一律走新做法（`DeviceQuirks.chunkedUploadDeclaresFullSize`）。

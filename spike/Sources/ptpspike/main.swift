@@ -11,6 +11,9 @@
 //   pwrite <storage> <dir> <chunkMB>   分段写：SendObject 首块 + SendPartialObject(0x95C2)，dir 必须是测试目录
 //   cmp <handle> <offsetMB...>         比对设备端与 SRC_FILE 在各偏移处的 1 MB
 //   crud <storage> <testDir> <n>       增删改查稳定性测试（只在 testDir 下的 crud-* 子目录里操作）
+//   install <storage> <A|B|C> <chunkMB>  往安装存储写 >4 GB 文件（SRC_FILE）。A：SendObjectPropList 声明 64 位大小 +
+//                                      SendPartialObject 从 0 写；B：SendObjectInfo 大小填 0xFFFFFFFF + 分段；
+//                                      C：SendObjectPropList + 首块 SendObject + 分段。NAME_PROP=0xDC44 换文件名属性
 //   rmtest <storage> <testDir>         递归删除 SwitchMTP-spike 测试目录（有名字/位置保护）
 //
 // 环境变量：PTP_VERBOSE=1 打印每条指令的原始收发；LS_MAX 限制 ls 输出条数。
@@ -40,6 +43,7 @@ enum Op {
     static let getObjectPropDesc: UInt16 = 0x9802
     static let getObjectPropValue: UInt16 = 0x9803
     static let getObjectPropList: UInt16 = 0x9805
+    static let sendObjectPropList: UInt16 = 0x9808
 }
 
 struct Reader {
@@ -545,6 +549,83 @@ extension Spike {
         let backMid = try await cmd(Op.getPartialObject64, [h, UInt32(mid & 0xFFFF_FFFF), UInt32(mid >> 32), 65536]).1
         print("回读：ObjectSize=\(devSize)（\(devSize == UInt64(size) ? "一致 ✅" : "不一致 ❌")），末尾 1MB \(back == file.subdata(in: Int(toff)..<size) ? "一致 ✅" : "不一致 ❌")，中段 64KB \(backMid == file.subdata(in: Int(mid)..<Int(mid) + 65536) ? "一致 ✅" : "不一致 ❌")")
     }
+
+    // MARK: 安装存储写大文件
+
+    func install(storage: UInt32, variant: String, chunk: Int) async throws {
+        guard let src = ProcessInfo.processInfo.environment["SRC_FILE"] else { throw PTPError(description: "需要 SRC_FILE") }
+        // 允许：5: SD Card install 根目录；或 1: SD Card 的 SwitchMTP-spike 测试目录（PARENT 指定）
+        var root: UInt32 = 0xFFFF_FFFF
+        if storage == 0x0001_0001, let p = ProcessInfo.processInfo.environment["PARENT"] {
+            root = UInt32(parseNum(p))
+            try await verifyTestDir(storage, root)
+        } else {
+            guard storage == 0x0001_0005 else { throw PTPError(description: "只允许写 5: SD Card install 或 SD 卡测试目录") }
+        }
+        let url = URL(fileURLWithPath: src)
+        let fh = try FileHandle(forReadingFrom: url)
+        let size = UInt64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize!)
+        let name = url.lastPathComponent
+        print("文件 \(name)，\(size) 字节，方式 \(variant)，每段 \(chunk >> 20) MB")
+
+        func propList() -> Data {
+            var w = Writer()
+            let nameProp = UInt16(parseNum(ProcessInfo.processInfo.environment["NAME_PROP"] ?? "0xDC07"))
+            w.u32(1)
+            w.u32(0); w.u16(nameProp); w.u16(0xFFFF); w.str(name)
+            return w.d
+        }
+        var h: UInt32
+        if let reuse = ProcessInfo.processInfo.environment["HANDLE"] {
+            h = UInt32(parseNum(reuse))
+        } else if variant == "B" {
+            var w = Writer()
+            w.u32(storage); w.u16(0x3000); w.u16(0); w.u32(0xFFFF_FFFF)
+            w.u16(0); w.u32(0); w.u32(0); w.u32(0); w.u32(0); w.u32(0); w.u32(0)
+            w.u32(root); w.u16(0); w.u32(0); w.u32(0)
+            w.str(name); w.str(""); w.str(""); w.str("")
+            h = try await cmd(Op.sendObjectInfo, [storage, root], out: w.d).0.params[2]
+        } else {
+            let r = try await cmd(Op.sendObjectPropList, [storage, root, 0x3000, UInt32(size >> 32), UInt32(size & 0xFFFF_FFFF)], out: propList()).0
+            print("SendObjectPropList 响应参数 \(r.params.map { hex($0, 8) })")
+            h = r.params[2]
+        }
+        print("新对象 handle=\(hex(h, 8))")
+
+        var off: UInt64 = 0
+        let t0 = Date()
+        if variant == "C" || variant == "B" {
+            let first = try fh.read(upToCount: chunk)!
+            _ = try await cmd(Op.sendObject, [], out: first)
+            off = UInt64(first.count)
+            print("首块 SendObject \(first.count) 字节 OK")
+            if ProcessInfo.processInfo.environment["STOP_AFTER_FIRST"] != nil {
+                try? await Task.sleep(for: .seconds(8))
+                let sz = try? await objectSize(h)
+                print("8 秒后对象大小：\(sz.map(String.init) ?? "对象已不存在")")
+                return
+            }
+        }
+        let edit = ProcessInfo.processInfo.environment["SKIP_EDIT"] == nil
+        if edit { _ = try await cmd(Op.beginEditObject, [h]) }
+        try fh.seek(toOffset: off)
+        var lastPrint = Date()
+        while off < size {
+            let n = Int(min(UInt64(chunk), size - off))
+            let data = try fh.read(upToCount: n)!
+            _ = try await cmd(Op.sendPartialObject, [h, UInt32(off & 0xFFFF_FFFF), UInt32(off >> 32), UInt32(n)], out: data)
+            off += UInt64(n)
+            if off == UInt64(n) || Date().timeIntervalSince(lastPrint) > 10 {
+                print("  \(off >> 20) / \(size >> 20) MB  平均 \(mb(Int(off), Date().timeIntervalSince(t0)))"); lastPrint = Date()
+            }
+        }
+        if edit { _ = try await cmd(Op.endEditObject, [h]) }
+        let dt = Date().timeIntervalSince(t0)
+        print(String(format: "全部写完：%.0fs，平均 %@", dt, mb(Int(size), dt)))
+        try? await Task.sleep(for: .seconds(5))
+        let left = try? await objectSize(h)
+        print("写完 5 秒后对象大小：\(left.map(String.init) ?? "对象已不存在")")
+    }
 }
 
 // MARK: - main
@@ -600,6 +681,21 @@ Task { @MainActor in
             try await spike.probeChars(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])), chars: Array(args.dropFirst(3)))
         case "probe-move":
             try await spike.probeMove(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
+        case "rminstall":
+            // 只删 5: SD Card install 根目录下、名字和 SRC_FILE 一致的对象
+            let h = UInt32(parseNum(args[1]))
+            let (_, d) = try await spike.cmd(Op.getObjectInfo, [h])
+            let o = ObjectInfo(d)
+            let want = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SRC_FILE"]!).lastPathComponent
+            guard o.storage == 0x0001_0005, o.name == want else { throw PTPError(description: "拒绝删除 \(o.name)") }
+            _ = try await spike.cmd(0x100B, [h, 0])
+            print("已删除 \(o.name)")
+        case "rmfile":
+            try await spike.verifyTestDir(0x0001_0001, UInt32(parseNum(args[2])))
+            try await spike.safeDelete(UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
+            print("已删除")
+        case "install":
+            try await spike.install(storage: UInt32(parseNum(args[1])), variant: args[2], chunk: Int(args[3])! << 20)
         case "rmtest":
             try await spike.rmtest(storage: UInt32(parseNum(args[1])), testDir: UInt32(parseNum(args[2])))
         case "pwrite":

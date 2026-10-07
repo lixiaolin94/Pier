@@ -132,10 +132,11 @@ extension MTPSession {
     /// - 不超过单条指令上限：默认一次 SendObject（XPC 走共享内存映射，不占内存，但拿不到真实进度，按经验速度估算）。
     /// - `preferChunked` 且设备支持编辑扩展：首块 SendObject 建对象，再 BeginEdit + SendPartialObject × N + EndEdit。
     /// - 超过上限（约 4 GB）：只能分段，设备不支持就报错。
-    /// 完成后回读大小校验（DBI 写失败时不报错）。
+    /// 完成后回读大小校验（DBI 写失败时不报错）。`verify` 为 false 时跳过：DBI 的安装存储收完 NSP 就安装并收走文件，
+    /// 回读只会读到 0，不能据此判失败、更不能删。
     @concurrent
     public func upload(file url: URL, name: String, storage: UInt32, parent: UInt32, progress: TransferProgress,
-                       preferChunked: Bool, priority: RequestPriority = .background) async throws -> UInt32 {
+                       preferChunked: Bool, verify: Bool = true, priority: RequestPriority = .background) async throws -> UInt32 {
         let size = UInt64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
         let chunked: Bool
         if size > UInt64(maxOutDataLength) {
@@ -150,7 +151,7 @@ extension MTPSession {
             : try await uploadSingle(url, size: size, name: name, storage: storage, parent: parent, progress: progress, priority: priority)
 
         // 0 字节文件没有可截断的内容，而 DBI 上这个句柄此时读不到，不做回读
-        guard size > 0 else { return handle }
+        guard verify, size > 0 else { return handle }
         do {
             try Task.checkCancellation()
             let actual = try await objectSize(handle, priority: .userInitiated)

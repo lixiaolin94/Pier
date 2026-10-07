@@ -83,6 +83,27 @@ private func tempDir() throws -> URL {
     #expect(device.objectCount == 0)
 }
 
+@Test func installTargetUploadSkipsVerificationAndKeepsObject() async throws {
+    let device = FakeDevice()
+    device.consumesUploads = true
+    let session = try makeSession(device, manufacturer: "Nintendo")
+    let src = try tempDir().appendingPathComponent("game.nsp")
+    try Data.pattern(9_000).write(to: src)
+
+    // 不跳过校验：回读到 0，判失败并删掉（0.1.3 及以前的行为）
+    await #expect(throws: TransferError.self) {
+        _ = try await session.upload(file: src, name: "game.nsp", storage: FakeDevice.storage, parent: PTPHandle.root,
+                                     progress: TransferProgress(), preferChunked: false)
+    }
+    #expect(device.ops().contains(.deleteObject))
+
+    // 安装存储跳过校验：算成功，不删
+    let before = device.ops().filter { $0 == .deleteObject }.count
+    _ = try await session.upload(file: src, name: "game.nsp", storage: FakeDevice.storage, parent: PTPHandle.root,
+                                 progress: TransferProgress(), preferChunked: false, verify: false)
+    #expect(device.ops().filter { $0 == .deleteObject }.count == before)
+}
+
 @Test func silentTruncationIsDetectedAndCleanedUp() async throws {
     let device = FakeDevice()
     device.truncateAt = 10_000   // 模拟 FAT32 静默截断

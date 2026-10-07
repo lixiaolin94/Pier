@@ -24,6 +24,8 @@ final class FakeDevice: PTPTransport, @unchecked Sendable {
     let maxOutDataLength: Int
     /// 模拟 FAT32：写入超过这个大小的部分被静默丢弃
     var truncateAt: Int?
+    /// 模拟 DBI 安装存储：收完就安装，设备上留下的对象大小是 0
+    var consumesUploads = false
     let delay: Duration
 
     init(maxOutDataLength: Int = 1 << 30, delay: Duration = .zero) {
@@ -115,7 +117,7 @@ final class FakeDevice: PTPTransport, @unchecked Sendable {
             lastCreated = nil
             let data = out ?? Data()
             if data.isEmpty { return fail(.generalError) }   // DBI 的行为
-            objects[h]?.data = truncate(data)
+            objects[h]?.data = consumesUploads ? Data() : truncate(data)
             return ok()
 
         case .beginEditObject, .endEditObject:

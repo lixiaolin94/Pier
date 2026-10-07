@@ -418,6 +418,8 @@ public final class TransferQueue {
         let destination = t.remoteFolder.last?.handle ?? PTPHandle.root
         let storage = context.storages.first { $0.id == t.storageID }
         let preferChunked = session.quirks.prefersChunkedUpload && (storage.map(session.quirks.allowsChunkedUpload(to:)) ?? false)
+        // DBI 安装存储：文件传完即被安装、不会留在设备上，所以不回读校验，也不把它当成新建的文件显示
+        let installs = storage.map(session.quirks.isInstallTarget) ?? false
 
         var handles: [[String]: UInt32] = [:]
         for e in t.entries! where e.done { if let h = e.handle { handles[e.path] = h } }
@@ -464,21 +466,21 @@ public final class TransferQueue {
                 t.progress.setCurrent(name)
                 let source = entry.path.dropFirst().reduce(t.localURL) { $0.appendingPathComponent($1) }
                 handle = try await session.upload(file: source, name: name, storage: t.storageID, parent: parent,
-                                                  progress: t.progress, preferChunked: preferChunked,
+                                                  progress: t.progress, preferChunked: preferChunked, verify: !installs,
                                                   priority: entry.size <= Self.smallFileThreshold ? .userInitiated : .background)
                 t.progress.fileCompleted()
             }
             handles[entry.path] = handle
             t.entries![i].handle = handle
             t.entries![i].done = true
-            if entry.path.count == 1 {
+            if entry.path.count == 1, !installs {
                 t.createdObject = MTPObject(handle: handle, storageID: t.storageID, parent: destination == PTPHandle.root ? t.storageID : destination,
                                             name: name, format: entry.isFolder ? .association : .undefined, size: entry.size, modified: nil)
             }
             save()
         }
         // 文件夹上传：完成时再确认一下顶层对象
-        if t.createdObject == nil, let h = handles[[t.remoteName]] {
+        if t.createdObject == nil, !installs, let h = handles[[t.remoteName]] {
             t.createdObject = try? await session.object(h, priority: .userInitiated)
         }
     }

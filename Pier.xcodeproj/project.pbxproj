@@ -296,7 +296,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Xiaolin";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.4;
+				MARKETING_VERSION = 0.1.5;
 				PRODUCT_BUNDLE_IDENTIFIER = work.xiaolin.Pier;
 				PRODUCT_NAME = Pier;
 				SDKROOT = macosx;
@@ -322,7 +322,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Xiaolin";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MARKETING_VERSION = 0.1.4;
+				MARKETING_VERSION = 0.1.5;
 				OTHER_CODE_SIGN_FLAGS = "--timestamp";
 				PRODUCT_BUNDLE_IDENTIFIER = work.xiaolin.Pier;
 				PRODUCT_NAME = Pier;

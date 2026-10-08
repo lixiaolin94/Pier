@@ -236,3 +236,8 @@ GetObjectPropsSupported(0x3000) = `DC41 PersistentUID, DC01 StorageID, DC0B Pare
 - 旧做法（SendObjectInfo 只声明首块 32 MB + SendObject 首块 + 分段）：全部 0x2001，但 ObjectSize = 4291821556，4 GB 后的数据被静默丢弃（和 2026-10-03 的结果一样）。
 - 新做法（SendObjectPropList 声明 7740651661 → BeginEdit → SendPartialObject 从偏移 0 写完 → EndEdit，不发 SendObject）：ObjectSize = 7740651661，在 0 / 2048 / 4094 / 4095 / 4096 / 4097 / 6000 / 7380 MB 处各取 1 MB 比对，全部一致。写速 31–33 MB/s。DBI 在 FAT32 上应该是按说明自动拆成归档文件夹存的。
 - Pier 已改为：DBI 的分段上传一律走新做法（`DeviceQuirks.chunkedUploadDeclaresFullSize`）。
+
+### >4 GB 游戏的推荐装法：DBI Backend（2026-10-08）
+DBI 的「从 DBIbackend 安装游戏」模式下，Switch 换成 VID 0x057E / PID 0x3000 的厂商自定义接口（class 0xFF），ptpcamerad 不占它，可以用 IOUSBHost 直接打开；
+协议同 DBI 官方 dbibackend（Switch 按文件名 + 64 位偏移要数据），没有 4 GB 限制。7.7 GB NSZ（38–39 MB/s）和 11.43 GB NSP 都装好并能启动。
+做成了独立的本机工具 `~/Documents/Xcode/DBIBackend`（不合入 Pier）。Pier 在往安装存储放 >4 GB 文件时的弹窗里推荐它，「传到 SD 卡」作为备选。

@@ -200,8 +200,9 @@ enum FileOperations {
             ? String(localized: "“\(files[0].lastPathComponent)”超过 4 GB，不能直接装")
             : String(localized: "有 \(files.count) 个文件超过 4 GB，不能直接装")
         var info = String(localized: "DBI 的安装存储要求一次收完整个文件，而 macOS 每次最多只能传 4 GB。")
+        info += String(localized: "推荐用 DBI Backend 直接安装：在 DBI 里选「从 DBIbackend 安装游戏」，把文件拖进 DBI Backend。")
         if let sd {
-            info += String(localized: "可以先传到“\(sd.displayName)”的根目录，传完后在 DBI 里选「浏览 SD 卡」找到它安装，装好后可以删掉。")
+            info += String(localized: "也可以先传到“\(sd.displayName)”的根目录，传完后在 DBI 里选「浏览 SD 卡」找到它安装，装好后可以删掉。")
             alert.addButton(withTitle: String(localized: "传到 SD 卡"))
         }
         alert.informativeText = info
